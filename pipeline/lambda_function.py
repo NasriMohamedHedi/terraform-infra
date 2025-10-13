@@ -7,8 +7,8 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from credentials import JENKINS_URL, JENKINS_TOKEN, JENKINS_USER, JENKINS_API_TOKEN
 
-# Pattern to match files like "<anything>_<timestamp>.json"
-PATTERN = re.compile(r"^.*_\d+\.json$")
+# Pattern to match files like "<username>_output_<timestamp>.json"
+PATTERN = re.compile(r"^.*_output_\d+\.json$")
 # Non-sensitive default
 JOB_NAME = os.environ.get("JOB_NAME", "terraform-deploy")
 
