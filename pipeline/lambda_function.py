@@ -5,15 +5,12 @@ import base64
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from credentials import JENKINS_URL, JENKINS_TOKEN, JENKINS_USER, JENKINS_API_TOKEN
 
-# Pattern to match files like "hash_id_ai_output_timestamp.json"
-PATTERN = re.compile(r"^[0-9a-f]+_ai_output_\d+\.json$")
-# Default JENKINS_URL, override with environment variable if set
-JENKINS_URL = os.environ.get("JENKINS_URL", "https://9216d38c2a3f.ngrok-free.app")
+# Pattern to match files like "<anything>_<timestamp>.json"
+PATTERN = re.compile(r"^.*_\d+\.json$")
+# Non-sensitive default
 JOB_NAME = os.environ.get("JOB_NAME", "terraform-deploy")
-JENKINS_TOKEN = os.environ.get("JENKINS_TOKEN", "THE_SAMURAI_TOKEN")
-JENKINS_USER = os.environ.get("JENKINS_USER", "admin")
-JENKINS_API_TOKEN = os.environ.get("JENKINS_API_TOKEN", "1187089acbf3d15c8f19f66b3accfd015e")
 
 def lambda_handler(event, context):
     for rec in event["Records"]:
@@ -41,7 +38,7 @@ def lambda_handler(event, context):
         except HTTPError as e:
             print(f"HTTP error triggering Jenkins for {key}: {e.code} {e.reason}")
         except URLError as e:
-            print(f"URL error triggering Jenkins for {key}: {e.reason}")  # Fixed line
+            print(f"URL error triggering Jenkins for {key}: {e.reason}")
         except Exception as e:
             print(f"Unexpected error triggering Jenkins for {key}: {str(e)}")
 
