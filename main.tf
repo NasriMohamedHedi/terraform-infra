@@ -1,9 +1,8 @@
-# Define the AWS provider
 provider "aws" {
   region = var.aws_region
 }
 
-# EC2-specific resources ()
+# EC2-specific resources
 resource "random_id" "unique_suffix" {
   byte_length = 4
   count       = local.payload.service_type == "ec2" ? 1 : 0
@@ -16,7 +15,7 @@ resource "tls_private_key" "ec2_key" {
 }
 
 resource "aws_key_pair" "ec2_key_pair" {
-  count     = local.payload.service_type == "ec2" ? 1 : 0
+  count      = local.payload.service_type == "ec2" ? 1 : 0
   key_name   = "client-access-key-${random_id.unique_suffix[0].hex}"
   public_key = tls_private_key.ec2_key[0].public_key_openssh
   lifecycle {
@@ -24,7 +23,7 @@ resource "aws_key_pair" "ec2_key_pair" {
   }
 }
 
-# EC2 output ()
+# EC2 output
 output "private_key_pem" {
   value     = local.payload.service_type == "ec2" ? tls_private_key.ec2_key[0].private_key_pem : null
   sensitive = true
@@ -40,7 +39,7 @@ data "aws_s3_object" "payload" {
 locals {
   payload = jsondecode(data.aws_s3_object.payload.body)
 
-  # EC2-specific locals - untouched
+  # EC2-specific locals
   instance_keys    = local.payload.service_type == "ec2" ? keys(local.payload.instances) : []
   instance_config  = local.payload.service_type == "ec2" ? local.payload.instances[local.instance_keys[0]] : null
   subnet_id        = local.instance_config != null ? lookup(local.instance_config, "subnet_id", "subnet-DEFAULT") : null
@@ -52,8 +51,8 @@ locals {
   vpc_id             = local.eks_config != null ? local.eks_config.vpc_id : null
   subnet_ids         = local.eks_config != null ? local.eks_config.subnet_ids : []
   use_fargate        = local.eks_config != null ? local.eks_config.use_fargate : false
-  fargate_selectors  = local.eks_config != null ? local.eks_config.fargate_selectors : []  # Default to empty list, module handles type
-  owner_name         = local.eks_config != null ? local.eks_config.Owner : null  # Use Owner from eks_config
+  fargate_selectors  = local.eks_config != null ? local.eks_config.fargate_selectors : []
+  owner_name         = local.eks_config != null ? local.eks_config.Owner : null
 
   # Validation to ensure required fields are present
   validate_eks = local.eks_config != null ? (
@@ -64,12 +63,13 @@ locals {
   ) : true
 }
 
-# Module deployment for EC2 ()
+# Module deployment for EC2
 module "ec2" {
   source           = "./modules/ec2"
   count            = local.payload.service_type == "ec2" ? 1 : 0
   instances        = local.payload.instances
   key_name         = aws_key_pair.ec2_key_pair[0].key_name
+  public_key       = tls_private_key.ec2_key[0].public_key_openssh
   security_group_id = local.instance_config != null ? local.instance_config.security_groups[0] : null
   subnet_id        = local.subnet_id
 }
@@ -87,7 +87,7 @@ module "eks" {
   owner_name         = local.owner_name
 }
 
-# Outputs for EC2 public IPs (untouched)
+# Outputs for EC2 public IPs
 output "ec2_public_ips" {
   value = local.payload.service_type == "ec2" ? module.ec2[0].public_ips : null
 }
