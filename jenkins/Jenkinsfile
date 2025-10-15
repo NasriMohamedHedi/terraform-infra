@@ -36,12 +36,9 @@ pipeline {
             steps {
                 script {
                     try {
-                        env.S3_PAYLOAD_KEY = params.KEY ?: sh(script: "aws s3 ls s3://${params.BUCKET}/ || echo 'no_key_found'", returnStdout: true).trim()
+                        env.S3_PAYLOAD_KEY = params.KEY ?: sh(script: "aws s3 ls s3://${params.BUCKET}/ | sort | tail -n 1 | awk '{print \$4}' || echo 'no_key_found'", returnStdout: true).trim()
                         if (env.S3_PAYLOAD_KEY == 'no_key_found' || env.S3_PAYLOAD_KEY == '') {
-                            env.S3_PAYLOAD_KEY = sh(script: "aws s3 ls s3://${params.BUCKET}/ | sort | tail -n 1 | awk '{print \$4}' || echo 'default_key'", returnStdout: true).trim()
-                            if (env.S3_PAYLOAD_KEY == 'default_key') {
-                                error "No payload JSON key found in S3 bucket ${params.BUCKET}"
-                            }
+                            error "No payload JSON key found in S3 bucket ${params.BUCKET}"
                         }
                         echo "Using provided S3 key: ${env.S3_PAYLOAD_KEY}"
                     } catch (Exception e) {
@@ -130,6 +127,7 @@ pipeline {
                                 terraform apply \
                                   -var 's3_payload_bucket=${params.BUCKET}' \
                                   -var 's3_payload_key=${env.S3_PAYLOAD_KEY}' \
+                                  -var 'aws_region=${AWS_DEFAULT_REGION}' \
                                   -auto-approve || exit 1
                             """
                             if (payload.service_type == 'ec2') {
@@ -138,17 +136,6 @@ pipeline {
                                     chmod 400 client-access-key.pem || exit 1
                                 """
                                 archiveArtifacts artifacts: 'client-access-key.pem'
-                            } else if (payload.service_type == 'eks') {
-                                def clusterName = sh(script: "terraform output -raw cluster_name || echo 'no_cluster'", returnStdout: true).trim()
-                                if (clusterName == 'no_cluster') {
-                                    error "No cluster name output, deployment failed"
-                                } else {
-                                    echo "Cluster created: ${clusterName}"
-                                    sh """
-                                        aws eks update-kubeconfig --name ${clusterName} --region ${AWS_DEFAULT_REGION}
-                                        kubectl cluster-info
-                                    """
-                                }
                             }
                         } catch (Exception e) {
                             error "Failed to apply Terraform: ${e.message}"

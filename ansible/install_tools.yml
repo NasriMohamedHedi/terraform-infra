@@ -1,4 +1,4 @@
-- name: Install specified tools
+- name: Install specified tools and CloudWatch Agent
   hosts: all
   become: yes
   tasks:
@@ -7,7 +7,7 @@
         update_cache: yes
       when: ansible_os_family == "Debian"
 
-    - name: Install CloudWatch Agent by default
+    - name: Install CloudWatch Agent
       block:
         - name: Download CloudWatch Agent package
           get_url:
@@ -33,5 +33,5 @@
       apt:
         name: "{{ item }}"
         state: present
-      loop: "{{ tools_to_install | default([]) }}"  # Use default filter directly in the loop
-      when: tools_to_install is defined and tools_to_install | length > 0  # Only run if tools are specified
+      loop: "{{ tools_to_install | default([]) }}"
+      when: tools_to_install is defined and tools_to_install | length > 0
