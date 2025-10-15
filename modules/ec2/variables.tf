@@ -6,7 +6,7 @@ variable "instances" {
     user_data              = optional(string)
     name                   = string
     security_groups        = list(string)
-    key_name               = optional(string, "client-access-key")  # Default to Terraform-managed key
+    key_name               = optional(string, "client-access-key")
     tags                   = optional(map(string))
     compliance_requirements = optional(list(string))
     tools_to_install       = optional(list(string))
@@ -16,6 +16,7 @@ variable "instances" {
 variable "security_group_id" {
   description = "Security group ID for the instances"
   type        = string
+  default     = null
 }
 
 variable "subnet_id" {
@@ -25,5 +26,11 @@ variable "subnet_id" {
 
 variable "key_name" {
   description = "Name of the SSH key pair"
+  type        = string
+  default     = "client-access-key"
+}
+
+variable "vpc_id" {
+  description = "VPC ID for the security group"
   type        = string
 }
