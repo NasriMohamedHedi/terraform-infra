@@ -5,7 +5,29 @@
     - name: Update apt cache
       apt:
         update_cache: yes
-      when: tools_to_install is defined and tools_to_install | length > 0  # Check if defined and non-empty
+      when: ansible_os_family == "Debian"
+
+    - name: Install CloudWatch Agent by default
+      block:
+        - name: Download CloudWatch Agent package
+          get_url:
+            url: https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+            dest: /tmp/amazon-cloudwatch-agent.deb
+            mode: '0644'
+
+        - name: Install CloudWatch Agent
+          apt:
+            deb: /tmp/amazon-cloudwatch-agent.deb
+            state: present
+
+        - name: Configure CloudWatch Agent
+          template:
+            src: amazon-cloudwatch-agent.j2
+            dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+            mode: '0644'
+
+        - name: Start CloudWatch Agent service
+          command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
     - name: Install tools
       apt:
