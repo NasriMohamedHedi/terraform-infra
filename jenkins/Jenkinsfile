@@ -152,34 +152,29 @@ stage('Install Tools with Ansible') {
                 def payload = readJSON file: 'payload.json'
                 def instance_name = payload.instances.keySet()[0]
 
-                // Get IP and ID
                 def ip = sh(script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
                 def instance_id = sh(script: "terraform output -json ec2_instance_ids | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
 
-                if (!ip || ip == 'null') error "No public IP for ${instance_name}"
-                if (!instance_id || instance_id == 'null') error "No instance ID for ${instance_name}"
+                if (!ip || ip == 'null') error "No public IP"
+                if (!instance_id || instance_id == 'null') error "No instance ID"
 
                 echo "EC2 Ready → IP: ${ip}, ID: ${instance_id}"
 
-                // Wait for SSH
                 timeout(15) {
                     waitUntil {
                         sh(script: "ssh -i client-access-key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${ip} 'echo ok'", returnStatus: true) == 0
                     }
                 }
 
-                // FIXED: Use collect instead of join
-                def tools_list = payload.instances[instance_name].tools_to_install
-                def tools_str = tools_list ? tools_list.collect { it }.join(' ') : ''
+                // FIXED LINE
+                def tools_str = payload.instances[instance_name].tools_to_install?.toList()?.join(' ') ?: ''
                 def extra_vars = tools_str ? "--extra-vars \"tools_to_install=${tools_str}\"" : ""
 
-                // Write inventory
                 writeFile file: 'inventory.ini', text: """
                 [ec2]
                 ${ip} ansible_user=ubuntu ansible_ssh_private_key_file=client-access-key.pem
                 """
 
-                // Run Ansible
                 sh "ansible-playbook -i inventory.ini ${extra_vars} ansible/install_tools.yml"
             }
         }
