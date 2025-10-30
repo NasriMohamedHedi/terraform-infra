@@ -1,21 +1,7 @@
 {
-  "metrics": {
-    "namespace": "EC2/Custom",
-    "metrics_collected": {
-      "cpu": {
-        "measurement": ["cpu_usage_idle", "cpu_usage_user"],
-        "metrics_collection_interval": 60
-      },
-      "mem": {
-        "measurement": ["mem_used", "mem_available"],
-        "metrics_collection_interval": 60
-      },
-      "disk": {
-        "measurement": ["used_percent"],
-        "metrics_collection_interval": 60,
-        "resources": ["*"]
-      }
-    }
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root"
   },
   "logs": {
     "logs_collected": {
@@ -23,10 +9,28 @@
         "collect_list": [
           {
             "file_path": "/var/log/syslog",
-            "log_group_name": "/ec2/syslog",
-            "log_stream_name": "{{ ansible_ec2_instance_id }}"
+            "log_group_name": "ec2-syslog",
+            "log_stream_name": "{instance_id}"
           }
         ]
+      }
+    }
+  },
+  "metrics": {
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}"
+    },
+    "metrics_collected": {
+      "cpu": {
+        "measurement": ["cpu_usage_idle", "cpu_usage_iowait"],
+        "metrics_collection_interval": 60
+      },
+      "disk": {
+        "measurement": ["used_percent"],
+        "resources": ["*"]
+      },
+      "mem": {
+        "measurement": ["mem_used_percent"]
       }
     }
   }

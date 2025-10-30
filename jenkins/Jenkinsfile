@@ -144,66 +144,44 @@ pipeline {
                 }
             }
         }
-        stage('Install Tools with Ansible') {
-            when {
-                expression { env.SERVICE_TYPE == 'ec2' }
-            }
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform-creds',
-                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-                ]]) {
-                    script {
-                        try {
-                            def payload = readJSON file: 'payload.json'
-                            def instance_keys = payload.instances.keySet()
-                            if (instance_keys.isEmpty()) {
-                                error "No instances found in payload"
-                            }
-                            def instance_key = instance_keys[0]
-                            def ip = sh(
-                                script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_key}\"' || echo 'no_ip'",
-                                returnStdout: true
-                            ).trim()
-                            def instance_id = sh(
-                                script: "terraform output -json ec2_instance_ids | jq -r '.\"${instance_key}\"' || echo 'no_id'",
-                                returnStdout: true
-                            ).trim()
-                            if (ip == 'no_ip' || !ip) {
-                                error "No IP found for instance ${instance_key}"
-                            }
-                            if (instance_id == 'no_id' || !instance_id) {
-                                error "No instance ID found for instance ${instance_key}"
-                            }
-                            def toolsList = payload.instances[instance_key].tools_to_install ?: []
-                            writeFile file: 'inventory.ini', text: "${ip} ansible_user=ubuntu ansible_ssh_private_key_file=${WORKSPACE}/client-access-key.pem ansible_ec2_instance_id=${instance_id}"
-                            timeout(time: 30, unit: 'MINUTES') {
-                                retry(10) {
-                                    sh """
-                                        until ssh -i client-access-key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@${ip} 'echo SSH is up' || exit 1; do
-                                            echo "Waiting for SSH... (Retrying in 30 seconds)"
-                                            sleep 30
-                                        done
-                                    """
-                                }
-                            }
-                            ansiblePlaybook(
-                                playbook: 'ansible/install_tools.yml',
-                                inventory: 'inventory.ini',
-                                extraVars: [
-                                    tools_to_install: toolsList,
-                                    ansible_ec2_instance_id: instance_id
-                                ]
-                            )
-                        } catch (Exception e) {
-                            error "Failed to install tools with Ansible: ${e.message}"
-                        }
+stage('Install Tools with Ansible') {
+    when { expression { env.SERVICE_TYPE == 'ec2' } }
+    steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+            script {
+                def payload = readJSON file: 'payload.json'
+                def instance_name = payload.instances.keySet()[0]
+
+                // Get IP and ID
+                def ip = sh(script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
+                def instance_id = sh(script: "terraform output -json ec2_instance_ids | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
+
+                if (!ip || ip == 'null') error "No public IP for ${instance_name}"
+                if (!instance_id || instance_id == 'null') error "No instance ID for ${instance_name}"
+
+                echo "EC2 Ready → IP: ${ip}, ID: ${instance_id}"
+
+                // Wait for SSH
+                timeout(15) {
+                    waitUntil {
+                        sh(script: "ssh -i client-access-key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${ip} 'echo ok'", returnStatus: true) == 0
                     }
                 }
+
+                // Ansible
+                writeFile file: 'inventory.ini', text: """
+                [ec2]
+                ${ip} ansible_user=ubuntu ansible_ssh_private_key_file=client-access-key.pem
+                """
+
+                def tools = payload.instances[instance_name].tools_to_install?.join(' ') ?: ''
+                def extra_vars = tools ? "--extra-vars \"tools_to_install=${tools}\"" : ""
+
+                sh "ansible-playbook -i inventory.ini ${extra_vars} ansible/install_tools.yml"
             }
         }
+    }
+}
         stage('Send SSH Details') {
             when {
                 expression { env.SERVICE_TYPE == 'ec2' }
