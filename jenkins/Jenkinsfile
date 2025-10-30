@@ -166,9 +166,10 @@ stage('Install Tools with Ansible') {
                     }
                 }
 
-                // FIXED LINE
-                def tools_str = payload.instances[instance_name].tools_to_install?.toList()?.join(' ') ?: ''
-                def extra_vars = tools_str ? "--extra-vars \"tools_to_install=${tools_str}\"" : ""
+                // FIXED: Convert to JSON string → Ansible sees list
+                def tools_list = payload.instances[instance_name].tools_to_install
+                def tools_json = tools_list ? writeJSON(returnText: true, json: tools_list) : '[]'
+                def extra_vars = "--extra-vars 'tools_to_install=${tools_json}'"
 
                 writeFile file: 'inventory.ini', text: """
                 [ec2]

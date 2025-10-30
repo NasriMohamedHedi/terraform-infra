@@ -31,7 +31,6 @@
 
     - name: Install tools
       apt:
-        name: "{{ item }}"
+        name: "{{ tools_to_install }}"
         state: present
-      loop: "{{ tools_to_install | default([]) }}"
       when: tools_to_install is defined and tools_to_install | length > 0
