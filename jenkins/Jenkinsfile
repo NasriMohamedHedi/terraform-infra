@@ -181,6 +181,82 @@ stage('Install Tools with Ansible') {
         }
     }
 }
+stage('Deploy Tools to EKS') {
+    when { expression { env.SERVICE_TYPE == 'eks' } }
+    steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+            script {
+                def payload = readJSON file: 'payload.json'
+                def cluster_name = payload.eks.cluster_name
+
+                echo "EKS Cluster: ${cluster_name}"
+
+                def kubeconfig = sh(script: "terraform output -raw kubeconfig", returnStdout: true).trim()
+                writeFile file: 'kubeconfig.yaml', text: kubeconfig
+                env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
+
+                timeout(10) {
+                    waitUntil {
+                        sh(script: "kubectl get nodes --kubeconfig kubeconfig.yaml", returnStatus: true) == 0
+                    }
+                }
+
+                def tools = payload.eks.tools_to_install ?: []
+                if (tools.size() > 0) {
+                    sh "helm repo add bitnami https://charts.bitnami.com/bitnami"
+                    sh "helm repo update"
+                    tools.each { tool ->
+                        echo "Deploying ${tool}..."
+                        sh "helm upgrade --install ${tool} bitnami/${tool} --namespace default --create-namespace --wait"
+                    }
+                }
+                echo "All tools deployed to EKS!"
+            }
+        }
+    }
+}
+
+stage('Send Kubeconfig') {
+    when { expression { env.SERVICE_TYPE == 'eks' } }
+    steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+            script {
+                def payload = readJSON file: 'payload.json'
+                def clientEmail = payload.client_email
+                def cluster_name = payload.eks.cluster_name
+
+                def kubeconfig = sh(script: "terraform output -raw kubeconfig", returnStdout: true).trim()
+                writeFile file: 'kubeconfig.yaml', text: kubeconfig
+
+                emailext(
+                    to: clientEmail,
+                    subject: "EKS Cluster Access: ${cluster_name}",
+                    body: """
+                    Hello,
+
+                    Your EKS cluster is ready!
+
+                    1. Save attached file as `kubeconfig.yaml`
+                    2. Set environment:
+                       export KUBECONFIG=kubeconfig.yaml
+                    3. Test access:
+                       kubectl get nodes
+
+                    Cluster: ${cluster_name}
+                    Region: ${AWS_DEFAULT_REGION}
+
+                    Cheers,
+                    The Samurai Team
+                    """,
+                    attachmentsPattern: 'kubeconfig.yaml',
+                    mimeType: 'text/plain'
+                )
+
+                sh "aws s3 cp kubeconfig.yaml s3://${params.BUCKET}/kubeconfig_${env.TIMESTAMP}.yaml"
+            }
+        }
+    }
+}
         stage('Send SSH Details') {
             when {
                 expression { env.SERVICE_TYPE == 'ec2' }

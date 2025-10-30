@@ -9,7 +9,7 @@ resource "random_id" "unique_suffix" {
 # IAM Role and Policy Attachments for EKS Cluster
 resource "aws_iam_role" "eks_cluster_role" {
   count = var.cluster_name != null ? 1 : 0
-  name  = "${var.cluster_name}-eks-cluster-role-${random_id.unique_suffix.hex}" # Add random suffix
+  name  = "${var.cluster_name}-eks-cluster-role-${random_id.unique_suffix.hex}"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -79,7 +79,7 @@ resource "aws_eks_cluster" "cluster" {
 # IAM Role and Policy Attachment for Fargate Profiles
 resource "aws_iam_role" "fargate_pod_execution_role" {
   count = var.cluster_name != null && var.use_fargate ? 1 : 0
-  name  = "${var.cluster_name}-fargate-pod-execution-role-${random_id.unique_suffix.hex}" # Add random suffix
+  name  = "${var.cluster_name}-fargate-pod-execution-role-${random_id.unique_suffix.hex}"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -118,7 +118,60 @@ resource "aws_eks_fargate_profile" "fargate_profile" {
   ]
 }
 
-# Outputs (unchanged)
+# ECR Repository for each tool
+resource "aws_ecr_repository" "tool_repo" {
+  for_each = toset(var.tools_to_install)
+  name     = "${var.cluster_name}-${each.value}"
+}
+
+# Helm Provider
+provider "helm" {
+  kubernetes {
+    host                   = aws_eks_cluster.cluster[0].endpoint
+    cluster_ca_certificate = base64decode(aws_eks_cluster.cluster[0].certificate_authority[0].data)
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.cluster[0].name]
+    }
+  }
+}
+
+# Helm Release for each tool
+resource "helm_release" "tool" {
+  for_each    = toset(var.tools_to_install)
+  name        = each.value
+  namespace   = "default"
+  repository  = "https://charts.bitnami.com/bitnami"
+  chart       = each.value
+  version     = "latest"
+
+  set {
+    name  = "image.repository"
+    value = aws_ecr_repository.tool_repo[each.value].repository_url
+  }
+
+  set {
+    name  = "image.tag"
+    value = "latest"
+  }
+
+  # Push image to ECR
+  provisioner "local-exec" {
+    command = <<-EOT
+      aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin ${aws_ecr_repository.tool_repo[each.value].repository_url}
+      docker pull bitnami/${each.value}:latest
+      docker tag bitnami/${each.value}:latest ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
+      docker push ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
+    EOT
+  }
+
+  depends_on = [aws_eks_fargate_profile.fargate_profile]
+}
+
+data "aws_region" "current" {}
+
+# Outputs
 output "cluster_name" {
   value = aws_eks_cluster.cluster[0].name
 }
@@ -137,4 +190,35 @@ output "cluster_id" {
 
 output "fargate_profile_names" {
   value = aws_eks_fargate_profile.fargate_profile[*].fargate_profile_name
+}
+
+output "kubeconfig" {
+  value = <<-EOT
+    apiVersion: v1
+    clusters:
+    - cluster:
+        server: ${aws_eks_cluster.cluster[0].endpoint}
+        certificate-authority-data: ${aws_eks_cluster.cluster[0].certificate_authority[0].data}
+      name: kubernetes
+    contexts:
+    - context:
+        cluster: kubernetes
+        user: aws
+      name: aws
+    current-context: aws
+    kind: Config
+    preferences: {}
+    users:
+    - name: aws
+      user:
+        exec:
+          apiVersion: client.authentication.k8s.io/v1beta1
+          command: aws
+          args:
+            - "eks"
+            - "get-token"
+            - "--cluster-name"
+            - "${aws_eks_cluster.cluster[0].name}"
+  EOT
+  sensitive = true
 }

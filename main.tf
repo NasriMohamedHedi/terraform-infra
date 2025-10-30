@@ -73,6 +73,7 @@ module "eks" {
   use_fargate        = lookup(local.eks_config, "use_fargate", false)
   fargate_selectors  = lookup(local.eks_config, "fargate_selectors", [])
   owner_name         = local.eks_config.Owner
+  tools_to_install   = lookup(local.eks_config, "tools_to_install", [])
 }
 
 # Outputs

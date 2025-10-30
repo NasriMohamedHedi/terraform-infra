@@ -46,3 +46,9 @@ variable "use_fargate" {
   type        = bool
   default     = false
 }
+
+variable "tools_to_install" {
+  description = "List of tools to install via Helm (e.g., nginx, redis)"
+  type        = list(string)
+  default     = []
+}
