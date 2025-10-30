@@ -168,15 +168,18 @@ stage('Install Tools with Ansible') {
                     }
                 }
 
-                // Ansible
+                // FIXED: Use collect instead of join
+                def tools_list = payload.instances[instance_name].tools_to_install
+                def tools_str = tools_list ? tools_list.collect { it }.join(' ') : ''
+                def extra_vars = tools_str ? "--extra-vars \"tools_to_install=${tools_str}\"" : ""
+
+                // Write inventory
                 writeFile file: 'inventory.ini', text: """
                 [ec2]
                 ${ip} ansible_user=ubuntu ansible_ssh_private_key_file=client-access-key.pem
                 """
 
-                def tools = payload.instances[instance_name].tools_to_install?.join(' ') ?: ''
-                def extra_vars = tools ? "--extra-vars \"tools_to_install=${tools}\"" : ""
-
+                // Run Ansible
                 sh "ansible-playbook -i inventory.ini ${extra_vars} ansible/install_tools.yml"
             }
         }
