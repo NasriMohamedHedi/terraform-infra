@@ -141,7 +141,7 @@ resource "null_resource" "push_tool_images" {
 
   provisioner "local-exec" {
     command = <<-EOT
-      aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin ${aws_ecr_repository.tool_repo[each.value].repository_url}
+      aws ecr get-login-password --region ${var.aws_region} | docker login --username AWS --password-stdin ${aws_ecr_repository.tool_repo[each.value].repository_url}
       docker pull bitnami/${each.value}:latest
       docker tag bitnami/${each.value}:latest ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
       docker push ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
@@ -176,8 +176,6 @@ resource "helm_release" "tool" {
     aws_eks_fargate_profile.fargate_profile
   ]
 }
-
-data "aws_region" "current" {}
 
 # Outputs
 output "cluster_name" {

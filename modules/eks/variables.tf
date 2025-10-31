@@ -48,3 +48,8 @@ variable "tools_to_install" {
   type        = list(string)
   default     = []
 }
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+}

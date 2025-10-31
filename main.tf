@@ -47,13 +47,33 @@ locals {
   security_groups  = local.first_instance != null ? lookup(local.first_instance, "security_groups", []) : []
 
   # EKS
-  is_eks           = local.payload.service_type == "eks"
-  eks_config       = local.is_eks ? local.payload.eks : {}
-  validate_eks     = local.is_eks ? (
-    lookup(local.eks_config, "cluster_name", "") != "" &&
-    lookup(local.eks_config, "vpc_id", "") != "" &&
-    length(lookup(local.eks_config, "subnet_ids", [])) > 0 &&
-    lookup(local.eks_config, "Owner", "") != ""
+  is_eks = local.payload.service_type == "eks"
+
+  eks_config = local.is_eks ? {
+    cluster_name       = lookup(local.payload.eks, "cluster_name", null)
+    vpc_id             = lookup(local.payload.eks, "vpc_id", null)
+    subnet_ids         = lookup(local.payload.eks, "subnet_ids", [])
+    use_fargate        = lookup(local.payload.eks, "use_fargate", false)
+    fargate_selectors  = lookup(local.payload.eks, "fargate_selectors", [])
+    Owner              = lookup(local.payload.eks, "Owner", null)
+    tools_to_install   = lookup(local.payload.eks, "tools_to_install", [])
+    kubernetes_version = lookup(local.payload.eks, "kubernetes_version", "1.29")
+  } : {
+    cluster_name       = null
+    vpc_id             = null
+    subnet_ids         = []
+    use_fargate        = false
+    fargate_selectors  = []
+    Owner              = null
+    tools_to_install   = []
+    kubernetes_version = "1.29"
+  }
+
+  validate_eks = local.is_eks ? (
+    local.eks_config.cluster_name != null &&
+    local.eks_config.vpc_id != null &&
+    length(local.eks_config.subnet_ids) > 0 &&
+    local.eks_config.Owner != null
   ) : true
 }
 
@@ -97,13 +117,14 @@ module "eks" {
   for_each           = local.is_eks && local.validate_eks ? toset(["eks"]) : toset([])
 
   cluster_name       = local.eks_config.cluster_name
-  kubernetes_version = lookup(local.eks_config, "kubernetes_version", "1.29")
+  kubernetes_version = local.eks_config.kubernetes_version
   vpc_id             = local.eks_config.vpc_id
   subnet_ids         = local.eks_config.subnet_ids
-  use_fargate        = lookup(local.eks_config, "use_fargate", false)
-  fargate_selectors  = lookup(local.eks_config, "fargate_selectors", [])
+  use_fargate        = local.eks_config.use_fargate
+  fargate_selectors  = local.eks_config.fargate_selectors
   owner_name         = local.eks_config.Owner
-  tools_to_install   = lookup(local.eks_config, "tools_to_install", [])
+  tools_to_install   = local.eks_config.tools_to_install
+  aws_region         = var.aws_region
 
   providers = {
     aws  = aws
