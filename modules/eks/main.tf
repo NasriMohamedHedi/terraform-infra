@@ -134,8 +134,6 @@ resource "null_resource" "push_tool_images" {
   depends_on = [aws_ecr_repository.tool_repo]
 }
 
-
-
 # Helm Releases for tools
 resource "helm_release" "tool" {
   for_each  = toset(var.tools_to_install)

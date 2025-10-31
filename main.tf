@@ -1,8 +1,20 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.0"
+    }
+  }
+}
+
 provider "aws" {
   region = var.aws_region
 }
 
-# Helm provider — depends on EKS cluster output
 provider "helm" {
   kubernetes {
     host                   = try(module.eks["eks"].cluster_endpoint, "")
@@ -75,7 +87,7 @@ module "ec2" {
   subnet_id       = local.subnet_id
 }
 
-# EKS Module — PASS PROVIDERS
+# EKS Module
 module "eks" {
   source             = "./modules/eks"
   for_each           = local.is_eks && local.validate_eks ? toset(["eks"]) : toset([])
@@ -104,7 +116,6 @@ output "ec2_instance_ids" {
   value = local.is_ec2 ? module.ec2[0].ec2_instance_ids : null
 }
 
-# EKS Outputs
 output "eks_cluster_name" {
   value = try(module.eks["eks"].cluster_name, null)
 }

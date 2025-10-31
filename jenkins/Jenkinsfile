@@ -191,7 +191,7 @@ stage('Deploy Tools to EKS') {
 
                 echo "EKS Cluster: ${cluster_name}"
 
-                def kubeconfig = sh(script: "terraform output -raw kubeconfig", returnStdout: true).trim()
+                def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
                 writeFile file: 'kubeconfig.yaml', text: kubeconfig
                 env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
@@ -225,7 +225,7 @@ stage('Send Kubeconfig') {
                 def clientEmail = payload.client_email
                 def cluster_name = payload.eks.cluster_name
 
-                def kubeconfig = sh(script: "terraform output -raw kubeconfig", returnStdout: true).trim()
+                def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
                 writeFile file: 'kubeconfig.yaml', text: kubeconfig
 
                 emailext(
