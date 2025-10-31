@@ -2,6 +2,19 @@ provider "aws" {
   region = var.aws_region
 }
 
+# Helm provider — depends on EKS cluster output
+provider "helm" {
+  kubernetes {
+    host                   = try(module.eks["eks"].cluster_endpoint, "")
+    cluster_ca_certificate = try(base64decode(module.eks["eks"].cluster_certificate_authority_data), "")
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", try(module.eks["eks"].cluster_name, "")]
+    }
+  }
+}
+
 data "aws_s3_object" "payload" {
   bucket = var.s3_payload_bucket
   key    = var.s3_payload_key
@@ -62,11 +75,11 @@ module "ec2" {
   subnet_id       = local.subnet_id
 }
 
-# EKS Module
+# EKS Module — PASS PROVIDERS
 module "eks" {
   source             = "./modules/eks"
   for_each           = local.is_eks && local.validate_eks ? toset(["eks"]) : toset([])
-  
+
   cluster_name       = local.eks_config.cluster_name
   kubernetes_version = lookup(local.eks_config, "kubernetes_version", "1.29")
   vpc_id             = local.eks_config.vpc_id
@@ -75,6 +88,11 @@ module "eks" {
   fargate_selectors  = lookup(local.eks_config, "fargate_selectors", [])
   owner_name         = local.eks_config.Owner
   tools_to_install   = lookup(local.eks_config, "tools_to_install", [])
+
+  providers = {
+    aws  = aws
+    helm = helm
+  }
 }
 
 # Outputs
@@ -84,4 +102,14 @@ output "ec2_public_ips" {
 
 output "ec2_instance_ids" {
   value = local.is_ec2 ? module.ec2[0].ec2_instance_ids : null
+}
+
+# EKS Outputs
+output "eks_cluster_name" {
+  value = try(module.eks["eks"].cluster_name, null)
+}
+
+output "eks_kubeconfig" {
+  value     = try(module.eks["eks"].kubeconfig, null)
+  sensitive = true
 }

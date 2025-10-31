@@ -134,18 +134,7 @@ resource "null_resource" "push_tool_images" {
   depends_on = [aws_ecr_repository.tool_repo]
 }
 
-# Helm Provider
-provider "helm" {
-  kubernetes {
-    host                   = aws_eks_cluster.cluster[0].endpoint
-    cluster_ca_certificate = base64decode(aws_eks_cluster.cluster[0].certificate_authority[0].data)
-    exec {
-      api_version = "client.authentication.k8s.io/v1beta1"
-      command     = "aws"
-      args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.cluster[0].name]
-    }
-  }
-}
+
 
 # Helm Releases for tools
 resource "helm_release" "tool" {
