@@ -87,30 +87,30 @@ pipeline {
                 }
             }
         }
-        stage('Terraform Init') {
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform-creds',
-                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-                ]]) {
-                    script {
-                        try {
-                            def payload = readJSON file: 'payload.json'
-                            if (payload.service_type) {
-                                sh "cp backends/backend-${payload.service_type}.tf backend.tf || echo 'No backend file for ${payload.service_type}'"
-                                sh "terraform init -input=false -reconfigure || echo 'Terraform init failed'"
-                            } else {
-                                error "Service type not found in payload"
-                            }
-                        } catch (Exception e) {
-                            error "Failed to initialize Terraform: ${e.message}"
-                        }
+stage('Terraform Init') {
+    steps {
+        withCredentials([[
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: 'aws-terraform-creds',
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+        ]]) {
+            script {
+                try {
+                    def payload = readJSON file: 'payload.json'
+                    if (payload.service_type) {
+                        sh "cp backends/backend-${payload.service_type}.tf backend.tf || echo 'No backend file for ${payload.service_type}'"
+                        sh "terraform init -input=false -reconfigure -upgrade"
+                    } else {
+                        error "Service type not found in payload"
                     }
+                } catch (Exception e) {
+                    error "Failed to initialize Terraform: ${e.message}"
                 }
             }
         }
+    }
+}
         stage('Terraform Apply') {
             steps {
                 withCredentials([[
