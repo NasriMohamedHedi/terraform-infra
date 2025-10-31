@@ -1,12 +1,10 @@
-# Generate a unique suffix for role names
+# Generate unique suffix
 resource "random_id" "unique_suffix" {
   byte_length = 4
-  keepers = {
-    cluster_name = var.cluster_name
-  }
+  keepers = { cluster_name = var.cluster_name }
 }
 
-# IAM Role and Policy Attachments for EKS Cluster
+# IAM Role for EKS Cluster
 resource "aws_iam_role" "eks_cluster_role" {
   count = var.cluster_name != null ? 1 : 0
   name  = "${var.cluster_name}-eks-cluster-role-${random_id.unique_suffix.hex}"
@@ -16,9 +14,7 @@ resource "aws_iam_role" "eks_cluster_role" {
     Statement = [{
       Action    = "sts:AssumeRole"
       Effect    = "Allow"
-      Principal = {
-        Service = "eks.amazonaws.com"
-      }
+      Principal = { Service = "eks.amazonaws.com" }
     }]
   })
 }
@@ -35,7 +31,7 @@ resource "aws_iam_role_policy_attachment" "eks_service_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSServicePolicy"
 }
 
-# Security Group for EKS Cluster
+# Security Group
 resource "aws_security_group" "eks_cluster" {
   count       = var.cluster_name != null ? 1 : 0
   name_prefix = "${var.cluster_name}-sg-"
@@ -43,7 +39,6 @@ resource "aws_security_group" "eks_cluster" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description = "Allow all within SG"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -58,7 +53,7 @@ resource "aws_security_group" "eks_cluster" {
   }
 }
 
-# EKS Cluster Resource
+# EKS Cluster
 resource "aws_eks_cluster" "cluster" {
   count    = var.cluster_name != null && length(var.subnet_ids) > 0 ? 1 : 0
   name     = var.cluster_name
@@ -67,7 +62,7 @@ resource "aws_eks_cluster" "cluster" {
 
   vpc_config {
     subnet_ids         = var.subnet_ids
-    security_group_ids = aws_security_group.eks_cluster[*].id
+    security_group_ids = [aws_security_group.eks_cluster[0].id]
   }
 
   depends_on = [
@@ -76,7 +71,7 @@ resource "aws_eks_cluster" "cluster" {
   ]
 }
 
-# IAM Role and Policy Attachment for Fargate Profiles
+# Fargate Pod Execution Role
 resource "aws_iam_role" "fargate_pod_execution_role" {
   count = var.cluster_name != null && var.use_fargate ? 1 : 0
   name  = "${var.cluster_name}-fargate-pod-execution-role-${random_id.unique_suffix.hex}"
@@ -86,9 +81,7 @@ resource "aws_iam_role" "fargate_pod_execution_role" {
     Statement = [{
       Action    = "sts:AssumeRole"
       Effect    = "Allow"
-      Principal = {
-        Service = "eks-fargate-pods.amazonaws.com"
-      }
+      Principal = { Service = "eks-fargate-pods.amazonaws.com" }
     }]
   })
 }
@@ -99,29 +92,46 @@ resource "aws_iam_role_policy_attachment" "fargate_pod_execution_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy"
 }
 
-# Fargate Profile Resources
+# Fargate Profiles
 resource "aws_eks_fargate_profile" "fargate_profile" {
-  count              = var.cluster_name != null && length(var.subnet_ids) > 0 && var.use_fargate ? length(var.fargate_selectors) : 0
+  count              = var.cluster_name != null && var.use_fargate ? length(var.fargate_selectors) : 0
   cluster_name       = aws_eks_cluster.cluster[0].name
-  fargate_profile_name = "${var.cluster_name}-fargate-profile-${count.index}"
+  fargate_profile_name = "${var.cluster_name}-fargate-${count.index}"
   pod_execution_role_arn = aws_iam_role.fargate_pod_execution_role[0].arn
   subnet_ids         = var.subnet_ids
 
   selector {
     namespace = var.fargate_selectors[count.index].namespace
-    labels    = var.fargate_selectors[count.index].labels
+    labels    = lookup(var.fargate_selectors[count.index], "labels", {})
   }
 
-  depends_on = [
-    aws_eks_cluster.cluster,
-    aws_iam_role_policy_attachment.fargate_pod_execution_policy
-  ]
+  depends_on = [aws_eks_cluster.cluster]
 }
 
-# ECR Repository for each tool
+# ECR Repositories for tools
 resource "aws_ecr_repository" "tool_repo" {
   for_each = toset(var.tools_to_install)
   name     = "${var.cluster_name}-${each.value}"
+}
+
+# Push images to ECR
+resource "null_resource" "push_tool_images" {
+  for_each = toset(var.tools_to_install)
+
+  triggers = {
+    repo_url = aws_ecr_repository.tool_repo[each.value].repository_url
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin ${aws_ecr_repository.tool_repo[each.value].repository_url}
+      docker pull bitnami/${each.value}:latest
+      docker tag bitnami/${each.value}:latest ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
+      docker push ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
+    EOT
+  }
+
+  depends_on = [aws_ecr_repository.tool_repo]
 }
 
 # Helm Provider
@@ -137,14 +147,15 @@ provider "helm" {
   }
 }
 
-# Helm Release for each tool
+# Helm Releases for tools
 resource "helm_release" "tool" {
-  for_each    = toset(var.tools_to_install)
-  name        = each.value
-  namespace   = "default"
-  repository  = "https://charts.bitnami.com/bitnami"
-  chart       = each.value
-  version     = "latest"
+  for_each  = toset(var.tools_to_install)
+  name      = each.value
+  namespace = "default"
+  repository = "https://charts.bitnami.com/bitnami"
+  chart     = each.value
+  version   = "latest"
+  create_namespace = true
 
   set {
     name  = "image.repository"
@@ -156,17 +167,10 @@ resource "helm_release" "tool" {
     value = "latest"
   }
 
-  # Push image to ECR
-  provisioner "local-exec" {
-    command = <<-EOT
-      aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin ${aws_ecr_repository.tool_repo[each.value].repository_url}
-      docker pull bitnami/${each.value}:latest
-      docker tag bitnami/${each.value}:latest ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
-      docker push ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
-    EOT
-  }
-
-  depends_on = [aws_eks_fargate_profile.fargate_profile]
+  depends_on = [
+    null_resource.push_tool_images,
+    aws_eks_fargate_profile.fargate_profile
+  ]
 }
 
 data "aws_region" "current" {}

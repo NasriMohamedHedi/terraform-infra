@@ -65,7 +65,8 @@ module "ec2" {
 # EKS Module
 module "eks" {
   source             = "./modules/eks"
-  count              = local.is_eks && local.validate_eks ? 1 : 0
+  for_each           = local.is_eks && local.validate_eks ? toset(["eks"]) : toset([])
+  
   cluster_name       = local.eks_config.cluster_name
   kubernetes_version = lookup(local.eks_config, "kubernetes_version", "1.29")
   vpc_id             = local.eks_config.vpc_id

@@ -17,16 +17,12 @@ variable "kubernetes_version" {
 }
 
 variable "fargate_selectors" {
-  description = "List of Fargate selectors with optional labels"
+  description = "List of Fargate selectors"
   type        = list(object({
     namespace = string
     labels    = optional(map(string))
   }))
-  default = [
-    {
-      namespace = "default"
-    }
-  ]
+  default = [{ namespace = "default" }]
 }
 
 variable "owner_name" {
@@ -42,13 +38,13 @@ variable "vpc_id" {
 }
 
 variable "use_fargate" {
-  description = "Flag to enable Fargate profiles"
+  description = "Enable Fargate"
   type        = bool
   default     = false
 }
 
 variable "tools_to_install" {
-  description = "List of tools to install via Helm (e.g., nginx, redis)"
+  description = "List of tools to deploy via Helm/ECR"
   type        = list(string)
   default     = []
 }
