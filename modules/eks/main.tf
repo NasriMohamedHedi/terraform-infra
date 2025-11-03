@@ -149,7 +149,6 @@ resource "aws_eks_fargate_profile" "fargate_profile" {
   depends_on = [aws_eks_cluster.cluster]
 }
 
-# ECR Repositories — NO TAGS, NO LISTING
 resource "aws_ecr_repository" "tool_repo" {
   for_each = toset(var.tools_to_install)
   name     = "${var.cluster_name}-${each.value}"
@@ -159,8 +158,14 @@ resource "aws_ecr_repository" "tool_repo" {
     scan_on_push = false
   }
 
+
+  tags = {}   # empty map = no tags ever set by Terraform
+
   lifecycle {
-    ignore_changes = [tags, tags_all]
+    ignore_changes = [
+      tags,
+      tags_all
+    ]
   }
 }
 
