@@ -121,7 +121,7 @@ module "eks" {
   vpc_id             = local.eks_config.vpc_id
   subnet_ids         = local.eks_config.subnet_ids
   use_fargate        = local.eks_config.use_fargate
-  fargate_selectors  = local.eks_config.fargate_selectors
+  fargate_selectors  = local.eks_config.use_fargate ? local.eks_config.fargate_selectors : []
   owner_name         = local.eks_config.Owner
   tools_to_install   = local.eks_config.tools_to_install
   aws_region         = var.aws_region

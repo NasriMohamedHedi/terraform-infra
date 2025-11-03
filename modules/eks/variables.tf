@@ -20,9 +20,9 @@ variable "fargate_selectors" {
   description = "List of Fargate selectors"
   type        = list(object({
     namespace = string
-    labels    = optional(map(string))
+    labels    = optional(map(string), {})
   }))
-  default = [{ namespace = "default" }]
+  default     = []
 }
 
 variable "owner_name" {

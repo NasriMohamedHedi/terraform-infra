@@ -109,9 +109,9 @@ resource "aws_iam_role_policy_attachment" "fargate_pod_execution_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy"
 }
 
-# Fargate Profiles
+# Fargate Profiles — only if selectors provided
 resource "aws_eks_fargate_profile" "fargate_profile" {
-  count              = var.cluster_name != null && var.use_fargate ? length(var.fargate_selectors) : 0
+  count              = var.use_fargate && length(var.fargate_selectors) > 0 ? length(var.fargate_selectors) : 0
   cluster_name       = aws_eks_cluster.cluster[0].name
   fargate_profile_name = "${var.cluster_name}-fargate-${count.index}"
   pod_execution_role_arn = aws_iam_role.fargate_pod_execution_role[0].arn
@@ -125,33 +125,42 @@ resource "aws_eks_fargate_profile" "fargate_profile" {
   depends_on = [aws_eks_cluster.cluster]
 }
 
-# ECR Repositories for tools
+# ECR Repositories — NO TAGS → NO ListTagsForResource
 resource "aws_ecr_repository" "tool_repo" {
   for_each = toset(var.tools_to_install)
   name     = "${var.cluster_name}-${each.value}"
+
+  image_tag_mutability = "MUTABLE"
+  image_scanning_configuration {
+    scan_on_push = false
+  }
 }
 
-# Push images to ECR
+# Push images to ECR — ROBUST with error handling
 resource "null_resource" "push_tool_images" {
   for_each = toset(var.tools_to_install)
 
   triggers = {
     repo_url = aws_ecr_repository.tool_repo[each.value].repository_url
+    image    = "bitnami/${each.value}:latest"
   }
 
   provisioner "local-exec" {
     command = <<-EOT
+      set -e
+      echo "Pushing ${each.value} to ECR..."
       aws ecr get-login-password --region ${var.aws_region} | docker login --username AWS --password-stdin ${aws_ecr_repository.tool_repo[each.value].repository_url}
       docker pull bitnami/${each.value}:latest
       docker tag bitnami/${each.value}:latest ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
       docker push ${aws_ecr_repository.tool_repo[each.value].repository_url}:latest
+      echo "Successfully pushed ${each.value}"
     EOT
   }
 
   depends_on = [aws_ecr_repository.tool_repo]
 }
 
-# Helm Releases for tools
+# Helm Releases
 resource "helm_release" "tool" {
   for_each  = toset(var.tools_to_install)
   name      = each.value
@@ -169,6 +178,15 @@ resource "helm_release" "tool" {
   set {
     name  = "image.tag"
     value = "latest"
+  }
+
+  # Optional: label for Fargate
+  dynamic "set" {
+    for_each = var.use_fargate ? [1] : []
+    content {
+      name  = "podLabels.app"
+      value = "tool-${each.value}"
+    }
   }
 
   depends_on = [
