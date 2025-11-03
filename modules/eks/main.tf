@@ -109,7 +109,7 @@ resource "aws_iam_role_policy_attachment" "fargate_pod_execution_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy"
 }
 
-# Fargate Profiles — only if selectors provided
+# Fargate Profiles
 resource "aws_eks_fargate_profile" "fargate_profile" {
   count              = var.use_fargate && length(var.fargate_selectors) > 0 ? length(var.fargate_selectors) : 0
   cluster_name       = aws_eks_cluster.cluster[0].name
@@ -125,7 +125,7 @@ resource "aws_eks_fargate_profile" "fargate_profile" {
   depends_on = [aws_eks_cluster.cluster]
 }
 
-# ECR Repositories — DISABLE TAG LISTING TO PREVENT ListTagsForResource
+# ECR Repositories — NO TAGS + IGNORE TAGS
 resource "aws_ecr_repository" "tool_repo" {
   for_each = toset(var.tools_to_install)
   name     = "${var.cluster_name}-${each.value}"
@@ -135,13 +135,13 @@ resource "aws_ecr_repository" "tool_repo" {
     scan_on_push = false
   }
 
-  # THIS IS THE FIX — Terraform stops calling ListTagsForResource
+  # FINAL PROTECTION: IGNORE TAGS
   lifecycle {
     ignore_changes = [tags, tags_all]
   }
 }
 
-# Push images to ECR — ROBUST with error handling
+# Push images to ECR
 resource "null_resource" "push_tool_images" {
   for_each = toset(var.tools_to_install)
 
@@ -185,7 +185,6 @@ resource "helm_release" "tool" {
     value = "latest"
   }
 
-  # Optional: label for Fargate
   dynamic "set" {
     for_each = var.use_fargate ? [1] : []
     content {
