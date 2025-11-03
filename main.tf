@@ -18,7 +18,13 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
-  # DISABLE ALL TAG LISTING → KILLS ListTagsForResource
+  # DISABLE TAG LISTING — CORRECT WAY
+  ignore_tags {
+    keys          = []
+    key_prefixes  = []
+  }
+
+  # Optional: reduce noise
   skip_requesting_account_id   = true
   skip_metadata_api_check      = true
   skip_region_validation       = true
@@ -27,9 +33,6 @@ provider "aws" {
   default_tags {
     tags = {}
   }
-
-  # THIS IS THE FINAL FIX
-  skip_tags = true
 }
 
 provider "helm" {
