@@ -1,33 +1,43 @@
-<<<<<<< HEAD
-# Terraform state and provider files
+# ────────────────────────────────
+# Terraform
+# ────────────────────────────────
 .terraform/
 *.tfstate
 *.tfstate.backup
-.terraform/providers/
-terraform-provider-*
 .terraform.lock.hcl
-secrets.txt
+terraform-provider-*
+.terraform/providers/
+
 # Terraform variable files
 *.tfvars
 pipeline/*.tfvars
 terraform.tfvars
 
-# Lambda deployment artifact
+# ────────────────────────────────
+# Lambda & build artifacts
+# ────────────────────────────────
 lambda.zip
+*.zip
 
-# Python cache files
+# ────────────────────────────────
+# Python
+# ────────────────────────────────
 __pycache__/
 *.pyc
 
-# Sensitive files (e.g., SSH keys)
+# ────────────────────────────────
+# Sensitive / credentials
+# ────────────────────────────────
 *.pem
 *.key
 **/.pem
 **/.key
-=======
-# Additional exclusions from 8ddf2f9
-.terraform.lock.hcl
-pipeline/.terraform.lock.hcl
-terraform-provider-*
-lambda.zip
->>>>>>> 8ddf2f9
+secrets.txt
+
+# ────────────────────────────────
+# IDE / editors
+# ────────────────────────────────
+.vscode/
+.idea/
+*.swp
+
