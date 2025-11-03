@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.70"   # ← Stable, no identity schema issues
+      version = "~> 5.70"
     }
     helm = {
       source  = "hashicorp/helm"
@@ -18,13 +18,13 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
-  # === CRITICAL FIXES ===
-  skip_requesting_account_id       = false
-  skip_metadata_api_check          = true
-  skip_region_validation           = true
-  skip_credentials_validation      = true
-  skip_get_ecr_authorization_token = true   # ← Stops token fetch
+  # LET AWS FETCH ACCOUNT ID
+  skip_requesting_account_id = false
+  skip_metadata_api_check    = true
+  skip_region_validation     = true
+  skip_credentials_validation = true
 
+  # DISABLE TAG READING → NO ListTagsForResource CALLS
   ignore_tags {
     keys         = []
     key_prefixes = []
