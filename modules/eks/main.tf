@@ -125,7 +125,7 @@ resource "aws_eks_fargate_profile" "fargate_profile" {
   depends_on = [aws_eks_cluster.cluster]
 }
 
-# ECR Repositories — NO TAGS → NO ListTagsForResource
+# ECR Repositories — DISABLE TAG LISTING TO PREVENT ListTagsForResource
 resource "aws_ecr_repository" "tool_repo" {
   for_each = toset(var.tools_to_install)
   name     = "${var.cluster_name}-${each.value}"
@@ -133,6 +133,11 @@ resource "aws_ecr_repository" "tool_repo" {
   image_tag_mutability = "MUTABLE"
   image_scanning_configuration {
     scan_on_push = false
+  }
+
+  # THIS IS THE FIX — Terraform stops calling ListTagsForResource
+  lifecycle {
+    ignore_changes = [tags, tags_all]
   }
 }
 
