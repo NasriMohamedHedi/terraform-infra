@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 6.0"
+      version = "6.2.0"
     }
     helm = {
       source  = "hashicorp/helm"
@@ -34,18 +34,30 @@ resource "aws_iam_role" "eks_cluster_role" {
       Principal = { Service = "eks.amazonaws.com" }
     }]
   })
+
+  lifecycle {
+    ignore_changes = [id]
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
   count      = var.cluster_name != null ? 1 : 0
   role       = aws_iam_role.eks_cluster_role[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+
+  lifecycle {
+    ignore_changes = [id]
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "eks_service_policy" {
   count      = var.cluster_name != null ? 1 : 0
   role       = aws_iam_role.eks_cluster_role[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSServicePolicy"
+
+  lifecycle {
+    ignore_changes = [id]
+  }
 }
 
 # Security Group
@@ -67,6 +79,10 @@ resource "aws_security_group" "eks_cluster" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  lifecycle {
+    ignore_changes = [id]
   }
 }
 
@@ -101,12 +117,20 @@ resource "aws_iam_role" "fargate_pod_execution_role" {
       Principal = { Service = "eks-fargate-pods.amazonaws.com" }
     }]
   })
+
+  lifecycle {
+    ignore_changes = [id]
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "fargate_pod_execution_policy" {
   count      = var.cluster_name != null && var.use_fargate ? 1 : 0
   role       = aws_iam_role.fargate_pod_execution_role[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy"
+
+  lifecycle {
+    ignore_changes = [id]
+  }
 }
 
 # Fargate Profiles

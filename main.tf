@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 6.0"
+      version = "6.2.0"  # FIXED: Pin to v6.2.0 for identity change bug
     }
     helm = {
       source  = "hashicorp/helm"
@@ -18,7 +18,7 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
-  # DISABLE TAG LISTING — CORRECT WAY
+  # FIXED: Disable tag listing to kill ListTagsForResource error
   ignore_tags {
     keys          = []
     key_prefixes  = []
