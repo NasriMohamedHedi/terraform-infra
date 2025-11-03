@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "6.2.0"
+      version = "~> 5.70"
     }
     helm = {
       source  = "hashicorp/helm"
@@ -149,7 +149,7 @@ resource "aws_eks_fargate_profile" "fargate_profile" {
   depends_on = [aws_eks_cluster.cluster]
 }
 
-# ECR Repositories — NO TAGS + IGNORE TAGS
+# ECR Repositories — NO TAGS, NO LISTING
 resource "aws_ecr_repository" "tool_repo" {
   for_each = toset(var.tools_to_install)
   name     = "${var.cluster_name}-${each.value}"
@@ -159,7 +159,6 @@ resource "aws_ecr_repository" "tool_repo" {
     scan_on_push = false
   }
 
-  # FINAL PROTECTION: IGNORE TAGS
   lifecycle {
     ignore_changes = [tags, tags_all]
   }

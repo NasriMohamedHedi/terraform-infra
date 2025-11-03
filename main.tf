@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "6.2.0"  # FIXED: Pin to v6.2.0 for identity change bug
+      version = "~> 5.70"   # ← Stable, no identity schema issues
     }
     helm = {
       source  = "hashicorp/helm"
@@ -18,17 +18,17 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
-  # FIXED: Disable tag listing to kill ListTagsForResource error
-  ignore_tags {
-    keys          = []
-    key_prefixes  = []
-  }
+  # === CRITICAL FIXES ===
+  skip_requesting_account_id       = false
+  skip_metadata_api_check          = true
+  skip_region_validation           = true
+  skip_credentials_validation      = true
+  skip_get_ecr_authorization_token = true   # ← Stops token fetch
 
-  # Optional: reduce noise
-  skip_requesting_account_id   = true
-  skip_metadata_api_check      = true
-  skip_region_validation       = true
-  skip_credentials_validation  = true
+  ignore_tags {
+    keys         = []
+    key_prefixes = []
+  }
 
   default_tags {
     tags = {}
