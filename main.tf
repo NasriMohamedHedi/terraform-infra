@@ -33,7 +33,7 @@ provider "aws" {
   }
 }
 
-# Defensive helm provider in root - uses module outputs at runtime (try() to avoid init-time errors)
+# Defensive Helm provider in root (uses try() so init doesn't fail)
 provider "helm" {
   kubernetes {
     host                   = try(module.eks[0].cluster_endpoint, "")
@@ -54,35 +54,29 @@ data "aws_s3_object" "payload" {
 locals {
   payload = jsondecode(data.aws_s3_object.payload.body)
 
-  # EC2
+  # safe copy of eks sub-object (empty map if not present)
+  payload_eks = try(local.payload.eks, {})
+
+  # EC2 flags & helpers (unchanged)
   is_ec2           = local.payload.service_type == "ec2"
   instance_keys    = local.is_ec2 ? keys(local.payload.instances) : []
   first_instance   = local.is_ec2 && length(local.instance_keys) > 0 ? local.payload.instances[local.instance_keys[0]] : null
   subnet_id        = local.first_instance != null ? lookup(local.first_instance, "subnet_id", null) : null
   security_groups  = local.first_instance != null ? lookup(local.first_instance, "security_groups", []) : []
 
-  # EKS
+  # EKS present?
   is_eks = local.payload.service_type == "eks"
 
-  # --- IMPORTANT: both branches must return the same types for each attribute ---
-  eks_config = local.is_eks ? {
-    cluster_name       = lookup(local.payload.eks, "cluster_name", "")
-    vpc_id             = lookup(local.payload.eks, "vpc_id", "")
-    subnet_ids         = lookup(local.payload.eks, "subnet_ids", [])
-    use_fargate        = lookup(local.payload.eks, "use_fargate", false)
-    fargate_selectors  = lookup(local.payload.eks, "fargate_selectors", [])
-    Owner              = tostring(lookup(local.payload.eks, "Owner", ""))   # explicit string
-    tools_to_install   = lookup(local.payload.eks, "tools_to_install", [])
-    kubernetes_version = lookup(local.payload.eks, "kubernetes_version", "1.29")
-  } : {
-    cluster_name       = ""
-    vpc_id             = ""
-    subnet_ids         = []
-    use_fargate        = false
-    fargate_selectors  = []
-    Owner              = ""
-    tools_to_install   = []
-    kubernetes_version = "1.29"
+  # Parse EKS attributes defensively — each attribute returns the same type always
+  eks_config = {
+    cluster_name       = lookup(local.payload_eks, "cluster_name", "")
+    vpc_id             = lookup(local.payload_eks, "vpc_id", "")
+    subnet_ids         = lookup(local.payload_eks, "subnet_ids", [])
+    use_fargate        = lookup(local.payload_eks, "use_fargate", false)
+    fargate_selectors  = lookup(local.payload_eks, "fargate_selectors", [])
+    Owner              = tostring(lookup(local.payload_eks, "Owner", ""))
+    tools_to_install   = lookup(local.payload_eks, "tools_to_install", [])
+    kubernetes_version = lookup(local.payload_eks, "kubernetes_version", "1.29")
   }
 
   validate_eks = local.is_eks ? (
@@ -144,7 +138,7 @@ module "eks" {
   aws_region         = var.aws_region
 }
 
-# Outputs (use try() to avoid failures when count==0)
+# Outputs (use try() safe access)
 output "ec2_public_ips" {
   value = local.is_ec2 ? module.ec2[0].public_ips : null
 }
