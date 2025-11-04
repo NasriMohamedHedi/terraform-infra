@@ -11,7 +11,7 @@ terraform {
   }
 }
 
-}
+
 
 # ✅ New Helm provider linked to cluster (for future helm_release use)
 provider "helm" {
