@@ -126,10 +126,10 @@ module "ec2" {
   subnet_id       = local.subnet_id
 }
 
-# EKS Module
 module "eks" {
-  source             = "./modules/eks"
-  for_each           = local.is_eks && local.validate_eks ? toset(["eks"]) : toset([])
+  source = "./modules/eks"
+
+  count = local.is_eks && local.validate_eks ? 1 : 0
 
   cluster_name       = local.eks_config.cluster_name
   kubernetes_version = local.eks_config.kubernetes_version
@@ -140,11 +140,6 @@ module "eks" {
   owner_name         = local.eks_config.Owner
   tools_to_install   = local.eks_config.tools_to_install
   aws_region         = var.aws_region
-
-  providers = {
-    aws  = aws
-    helm = helm
-  }
 }
 
 # Outputs
