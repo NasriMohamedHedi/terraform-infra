@@ -33,7 +33,7 @@ provider "aws" {
   }
 }
 
-# Defensive Helm provider in root (uses try() so init doesn't fail)
+# Defensive Helm provider in root (uses try() so init won't fail when cluster not yet created)
 provider "helm" {
   kubernetes {
     host                   = try(module.eks[0].cluster_endpoint, "")
@@ -54,29 +54,46 @@ data "aws_s3_object" "payload" {
 locals {
   payload = jsondecode(data.aws_s3_object.payload.body)
 
-  # safe copy of eks sub-object (empty map if not present)
+  # safe eks payload (empty map if not set)
   payload_eks = try(local.payload.eks, {})
 
-  # EC2 flags & helpers (unchanged)
+  # --- EC2 (unchanged behaviour) ---
   is_ec2           = local.payload.service_type == "ec2"
   instance_keys    = local.is_ec2 ? keys(local.payload.instances) : []
   first_instance   = local.is_ec2 && length(local.instance_keys) > 0 ? local.payload.instances[local.instance_keys[0]] : null
   subnet_id        = local.first_instance != null ? lookup(local.first_instance, "subnet_id", null) : null
   security_groups  = local.first_instance != null ? lookup(local.first_instance, "security_groups", []) : []
 
-  # EKS present?
+  # --- EKS flags & defensive parsing ---
   is_eks = local.payload.service_type == "eks"
 
-  # Parse EKS attributes defensively — each attribute returns the same type always
+  # ensure subnet_ids are always a list of strings
+  eks_subnet_ids_raw = lookup(local.payload_eks, "subnet_ids", [])
+  eks_subnet_ids = [for id in local.eks_subnet_ids_raw : tostring(id)]
+
+  # normalize fargate_selectors -> list(object{namespace, labels(map[string])})
+  eks_fargate_raw = lookup(local.payload_eks, "fargate_selectors", [])
+  eks_fargate_selectors = [
+    for s in local.eks_fargate_raw : {
+      namespace = tostring(lookup(s, "namespace", "default"))
+      labels    = { for k, v in try(lookup(s, "labels", {}), {}) : k => tostring(v) }
+    }
+  ]
+
+  # ensure tools_to_install is always list(string)
+  eks_tools_raw = lookup(local.payload_eks, "tools_to_install", [])
+  eks_tools = [for t in local.eks_tools_raw : tostring(t)]
+
+  # assembled eks_config (each attribute has a consistent type)
   eks_config = {
-    cluster_name       = lookup(local.payload_eks, "cluster_name", "")
-    vpc_id             = lookup(local.payload_eks, "vpc_id", "")
-    subnet_ids         = lookup(local.payload_eks, "subnet_ids", [])
+    cluster_name       = tostring(lookup(local.payload_eks, "cluster_name", ""))
+    vpc_id             = tostring(lookup(local.payload_eks, "vpc_id", ""))
+    subnet_ids         = local.eks_subnet_ids
     use_fargate        = lookup(local.payload_eks, "use_fargate", false)
-    fargate_selectors  = lookup(local.payload_eks, "fargate_selectors", [])
+    fargate_selectors  = local.eks_fargate_selectors
     Owner              = tostring(lookup(local.payload_eks, "Owner", ""))
-    tools_to_install   = lookup(local.payload_eks, "tools_to_install", [])
-    kubernetes_version = lookup(local.payload_eks, "kubernetes_version", "1.29")
+    tools_to_install   = local.eks_tools
+    kubernetes_version = tostring(lookup(local.payload_eks, "kubernetes_version", "1.29"))
   }
 
   validate_eks = local.is_eks ? (
@@ -87,7 +104,9 @@ locals {
   ) : true
 }
 
+# ----------------
 # EC2 Key Pair (unchanged)
+# ----------------
 resource "random_id" "unique_suffix" {
   count       = local.is_ec2 ? 1 : 0
   byte_length = 4
@@ -121,7 +140,7 @@ module "ec2" {
   subnet_id       = local.subnet_id
 }
 
-# EKS module call (unchanged semantics)
+# EKS module call (unchanged semantics, but now gets normalized inputs)
 module "eks" {
   source = "./modules/eks"
 
@@ -138,7 +157,7 @@ module "eks" {
   aws_region         = var.aws_region
 }
 
-# Outputs (use try() safe access)
+# Outputs
 output "ec2_public_ips" {
   value = local.is_ec2 ? module.ec2[0].public_ips : null
 }
