@@ -82,7 +82,17 @@ locals {
 
   # ensure tools_to_install is always list(string)
   eks_tools_raw = lookup(local.payload_eks, "tools_to_install", [])
-  eks_tools = [for t in local.eks_tools_raw : tostring(t)]
+
+  # Defensive coercion:
+  #  - if tostring() works use it
+  #  - else try t["name"] or t["tool"]
+  #  - else jsonencode the whole object (so we still pass a string)
+  eks_tools = [
+    for t in local.eks_tools_raw :
+    can(tostring(t)) ? tostring(t) :
+    (can(t["name"]) ? tostring(t["name"]) :
+    (can(t["tool"]) ? tostring(t["tool"]) : jsonencode(t)))
+  ]
 
   # assembled eks_config (each attribute has a consistent type)
   eks_config = {
