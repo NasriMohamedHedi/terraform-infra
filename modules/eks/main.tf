@@ -11,6 +11,13 @@ terraform {
   }
 }
 
+# NOTE: Do NOT declare provider "helm" or provider "aws" inside a module that
+# will be instantiated conditionally by count/for_each. Root providers will be used.
+
+data "aws_eks_cluster_auth" "cluster" {
+  name = try(aws_eks_cluster.cluster[0].name, "")
+}
+
 # Generate unique suffix
 resource "random_id" "unique_suffix" {
   byte_length = 4
@@ -166,7 +173,7 @@ resource "aws_ecr_repository" "tool_repo" {
     scan_on_push = false
   }
 
-  tags = {}   # empty map = no tags ever set by Terraform
+  tags = {}   # intentionally empty
 
   lifecycle {
     ignore_changes = [
@@ -178,26 +185,25 @@ resource "aws_ecr_repository" "tool_repo" {
 
 # Outputs
 output "cluster_name" {
-  value = aws_eks_cluster.cluster[0].name
+  value = try(aws_eks_cluster.cluster[0].name, null)
 }
 
 output "cluster_endpoint" {
-  value = aws_eks_cluster.cluster[0].endpoint
+  value = try(aws_eks_cluster.cluster[0].endpoint, null)
 }
 
 output "cluster_certificate_authority_data" {
-  value = aws_eks_cluster.cluster[0].certificate_authority[0].data
+  value = try(aws_eks_cluster.cluster[0].certificate_authority[0].data, null)
 }
 
 output "cluster_id" {
-  value = aws_eks_cluster.cluster[0].id
+  value = try(aws_eks_cluster.cluster[0].id, null)
 }
 
 output "fargate_profile_names" {
-  value = aws_eks_fargate_profile.fargate_profile[*].fargate_profile_name
+  value = try(aws_eks_fargate_profile.fargate_profile[*].fargate_profile_name, [])
 }
 
-# Map: tool_name -> ecr repository URL
 output "ecr_repo_urls" {
   value = { for k, r in aws_ecr_repository.tool_repo : k => r.repository_url }
 }

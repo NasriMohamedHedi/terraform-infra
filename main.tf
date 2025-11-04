@@ -33,7 +33,7 @@ provider "aws" {
   }
 }
 
-# Defensive Helm provider in root (uses try() so init won't fail when cluster not yet created)
+# defensive helm provider in root (safe when cluster not yet created)
 provider "helm" {
   kubernetes {
     host                   = try(module.eks[0].cluster_endpoint, "")
@@ -54,24 +54,24 @@ data "aws_s3_object" "payload" {
 locals {
   payload = jsondecode(data.aws_s3_object.payload.body)
 
-  # safe eks payload (empty map if not set)
+  # defensive default: ensure payload.eks exists and is an object/map
   payload_eks = try(local.payload.eks, {})
 
-  # --- EC2 (unchanged behaviour) ---
+  # EC2 (unchanged behavior)
   is_ec2           = local.payload.service_type == "ec2"
   instance_keys    = local.is_ec2 ? keys(local.payload.instances) : []
   first_instance   = local.is_ec2 && length(local.instance_keys) > 0 ? local.payload.instances[local.instance_keys[0]] : null
   subnet_id        = local.first_instance != null ? lookup(local.first_instance, "subnet_id", null) : null
   security_groups  = local.first_instance != null ? lookup(local.first_instance, "security_groups", []) : []
 
-  # --- EKS flags & defensive parsing ---
+  # EKS flags & defensive parsing
   is_eks = local.payload.service_type == "eks"
 
-  # ensure subnet_ids are always a list of strings
+  # normalize subnet_ids -> list(string)
   eks_subnet_ids_raw = lookup(local.payload_eks, "subnet_ids", [])
   eks_subnet_ids = [for id in local.eks_subnet_ids_raw : tostring(id)]
 
-  # normalize fargate_selectors -> list(object{namespace, labels(map[string])})
+  # normalize fargate selectors to object list { namespace, labels = map(string) }
   eks_fargate_raw = lookup(local.payload_eks, "fargate_selectors", [])
   eks_fargate_selectors = [
     for s in local.eks_fargate_raw : {
@@ -80,13 +80,8 @@ locals {
     }
   ]
 
-  # ensure tools_to_install is always list(string)
+  # normalize tools_to_install -> list(string)
   eks_tools_raw = lookup(local.payload_eks, "tools_to_install", [])
-
-  # Defensive coercion:
-  #  - if tostring() works use it
-  #  - else try t["name"] or t["tool"]
-  #  - else jsonencode the whole object (so we still pass a string)
   eks_tools = [
     for t in local.eks_tools_raw :
     can(tostring(t)) ? tostring(t) :
@@ -94,7 +89,6 @@ locals {
     (can(t["tool"]) ? tostring(t["tool"]) : jsonencode(t)))
   ]
 
-  # assembled eks_config (each attribute has a consistent type)
   eks_config = {
     cluster_name       = tostring(lookup(local.payload_eks, "cluster_name", ""))
     vpc_id             = tostring(lookup(local.payload_eks, "vpc_id", ""))
@@ -139,7 +133,7 @@ output "private_key_pem" {
   sensitive = true
 }
 
-# EC2 module (unchanged)
+# EC2 Module (unchanged)
 module "ec2" {
   source          = "./modules/ec2"
   count           = local.is_ec2 ? 1 : 0
@@ -150,7 +144,7 @@ module "ec2" {
   subnet_id       = local.subnet_id
 }
 
-# EKS module call (unchanged semantics, but now gets normalized inputs)
+# EKS Module (normalized inputs)
 module "eks" {
   source = "./modules/eks"
 

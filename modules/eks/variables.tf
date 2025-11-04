@@ -1,13 +1,13 @@
 variable "cluster_name" {
   description = "Name of the EKS cluster"
   type        = string
-  nullable    = false
+  default     = ""
 }
 
 variable "subnet_ids" {
   description = "List of subnet IDs"
   type        = list(string)
-  nullable    = false
+  default     = []
 }
 
 variable "kubernetes_version" {
@@ -18,23 +18,23 @@ variable "kubernetes_version" {
 
 variable "fargate_selectors" {
   description = "List of Fargate selectors"
-  type        = list(object({
+  type = list(object({
     namespace = string
     labels    = optional(map(string), {})
   }))
-  default     = []
+  default = []
 }
 
 variable "owner_name" {
   description = "Owner of the cluster"
   type        = string
-  nullable    = false
+  default     = ""
 }
 
 variable "vpc_id" {
   description = "VPC ID for the EKS cluster"
   type        = string
-  nullable    = true
+  default     = ""
 }
 
 variable "use_fargate" {
@@ -44,7 +44,7 @@ variable "use_fargate" {
 }
 
 variable "tools_to_install" {
-  description = "List of tools to deploy via Helm/ECR"
+  description = "List of tools to deploy via Helm/ECR (list of string)"
   type        = list(string)
   default     = []
 }
@@ -52,5 +52,6 @@ variable "tools_to_install" {
 variable "aws_region" {
   description = "AWS region"
   type        = string
+  default     = "eu-central-1"
 }
 
