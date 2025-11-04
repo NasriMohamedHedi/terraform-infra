@@ -165,3 +165,7 @@ output "eks_kubeconfig" {
   value     = try(module.eks["eks"].kubeconfig, null)
   sensitive = true
 }
+output "eks_ecr_repo_urls" {
+  value = try(module.eks["eks"].ecr_repo_urls, null)
+}
+

@@ -49,7 +49,7 @@ pipeline {
         }
         stage('Download Payload JSON') {
             steps {
-                withCredentials([[
+                withCredentials([[ 
                     $class: 'AmazonWebServicesCredentialsBinding',
                     credentialsId: 'aws-terraform-creds',
                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
@@ -87,33 +87,33 @@ pipeline {
                 }
             }
         }
-stage('Terraform Init') {
-    steps {
-        withCredentials([[
-            $class: 'AmazonWebServicesCredentialsBinding',
-            credentialsId: 'aws-terraform-creds',
-            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-        ]]) {
-            script {
-                try {
-                    def payload = readJSON file: 'payload.json'
-                    if (payload.service_type) {
-                        sh "cp backends/backend-${payload.service_type}.tf backend.tf || echo 'No backend file for ${payload.service_type}'"
-                        sh "terraform init -input=false -reconfigure -upgrade"
-                    } else {
-                        error "Service type not found in payload"
+        stage('Terraform Init') {
+            steps {
+                withCredentials([[ 
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-terraform-creds',
+                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                ]]) {
+                    script {
+                        try {
+                            def payload = readJSON file: 'payload.json'
+                            if (payload.service_type) {
+                                sh "cp backends/backend-${payload.service_type}.tf backend.tf || echo 'No backend file for ${payload.service_type}'"
+                                sh "terraform init -input=false -reconfigure -upgrade"
+                            } else {
+                                error "Service type not found in payload"
+                            }
+                        } catch (Exception e) {
+                            error "Failed to initialize Terraform: ${e.message}"
+                        }
                     }
-                } catch (Exception e) {
-                    error "Failed to initialize Terraform: ${e.message}"
                 }
             }
         }
-    }
-}
         stage('Terraform Apply') {
             steps {
-                withCredentials([[
+                withCredentials([[ 
                     $class: 'AmazonWebServicesCredentialsBinding',
                     credentialsId: 'aws-terraform-creds',
                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
@@ -144,125 +144,209 @@ stage('Terraform Init') {
                 }
             }
         }
-stage('Install Tools with Ansible') {
-    when { expression { env.SERVICE_TYPE == 'ec2' } }
-    steps {
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
-            script {
-                def payload = readJSON file: 'payload.json'
-                def instance_name = payload.instances.keySet()[0]
+        stage('Install Tools with Ansible') {
+            when { expression { env.SERVICE_TYPE == 'ec2' } }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+                    script {
+                        def payload = readJSON file: 'payload.json'
+                        def instance_name = payload.instances.keySet()[0]
 
-                def ip = sh(script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
-                def instance_id = sh(script: "terraform output -json ec2_instance_ids | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
+                        def ip = sh(script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
+                        def instance_id = sh(script: "terraform output -json ec2_instance_ids | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
 
-                if (!ip || ip == 'null') error "No public IP"
-                if (!instance_id || instance_id == 'null') error "No instance ID"
+                        if (!ip || ip == 'null') error "No public IP"
+                        if (!instance_id || instance_id == 'null') error "No instance ID"
 
-                echo "EC2 Ready → IP: ${ip}, ID: ${instance_id}"
+                        echo "EC2 Ready → IP: ${ip}, ID: ${instance_id}"
 
-                timeout(15) {
-                    waitUntil {
-                        sh(script: "ssh -i client-access-key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${ip} 'echo ok'", returnStatus: true) == 0
+                        timeout(15) {
+                            waitUntil {
+                                sh(script: "ssh -i client-access-key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${ip} 'echo ok'", returnStatus: true) == 0
+                            }
+                        }
+
+                        // FIXED: Convert to JSON string → Ansible sees list
+                        def tools_list = payload.instances[instance_name].tools_to_install
+                        def tools_json = tools_list ? writeJSON(returnText: true, json: tools_list) : '[]'
+                        def extra_vars = "--extra-vars 'tools_to_install=${tools_json}'"
+
+                        writeFile file: 'inventory.ini', text: """
+                        [ec2]
+                        ${ip} ansible_user=ubuntu ansible_ssh_private_key_file=client-access-key.pem
+                        """
+
+                        sh "ansible-playbook -i inventory.ini ${extra_vars} ansible/install_tools.yml"
                     }
                 }
-
-                // FIXED: Convert to JSON string → Ansible sees list
-                def tools_list = payload.instances[instance_name].tools_to_install
-                def tools_json = tools_list ? writeJSON(returnText: true, json: tools_list) : '[]'
-                def extra_vars = "--extra-vars 'tools_to_install=${tools_json}'"
-
-                writeFile file: 'inventory.ini', text: """
-                [ec2]
-                ${ip} ansible_user=ubuntu ansible_ssh_private_key_file=client-access-key.pem
-                """
-
-                sh "ansible-playbook -i inventory.ini ${extra_vars} ansible/install_tools.yml"
             }
         }
-    }
-}
-stage('Deploy Tools to EKS') {
-    when { expression { env.SERVICE_TYPE == 'eks' } }
-    steps {
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
-            script {
-                def payload = readJSON file: 'payload.json'
-                def cluster_name = payload.eks.cluster_name
 
-                echo "EKS Cluster: ${cluster_name}"
+        /*****************************************************************
+         * Enhanced EKS deployment stage (keeps working EC2 pipeline intact)
+         * - reads kubeconfig & ecr repo URLs from terraform outputs
+         * - creates namespaces
+         * - pulls public images, tags->pushes to ECR repos created by Terraform
+         * - performs helm upgrade --install with image overrides
+         *****************************************************************/
+        stage('Deploy Tools to EKS') {
+            when { expression { env.SERVICE_TYPE == 'eks' } }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+                    script {
+                        def payload = readJSON file: 'payload.json'
+                        def cluster_name = payload.eks.cluster_name
 
-                def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
-                writeFile file: 'kubeconfig.yaml', text: kubeconfig
-                env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
+                        echo "EKS Cluster: ${cluster_name}"
 
-                timeout(10) {
-                    waitUntil {
-                        sh(script: "kubectl get nodes --kubeconfig kubeconfig.yaml", returnStatus: true) == 0
+                        // fetch kubeconfig and ecr map
+                        def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig || echo ''", returnStdout: true).trim()
+                        writeFile file: 'kubeconfig.yaml', text: kubeconfig
+                        env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
+
+                        sh "terraform output -json eks_ecr_repo_urls > ecr_repo_urls.json || echo '{}' > ecr_repo_urls.json"
+
+                        // Wait for API to respond (default ns reachable)
+                        timeout(10) {
+                            waitUntil {
+                                sh(script: "kubectl get ns default --kubeconfig kubeconfig.yaml", returnStatus: true) == 0
+                            }
+                        }
+
+                        def tools_raw = payload.eks.tools_to_install ?: []
+                        def tools = []
+                        tools_raw.each { t ->
+                            if (t instanceof String) {
+                                tools << [name: t, chart: t, chart_repo: "https://charts.bitnami.com/bitnami", namespace: "default", use_ecr: true]
+                            } else if (t instanceof Map) {
+                                tools << [
+                                    name: t.name ?: t.chart,
+                                    chart: t.chart ?: t.name,
+                                    chart_repo: t.chart_repo ?: "https://charts.bitnami.com/bitnami",
+                                    namespace: t.namespace ?: "default",
+                                    custom_image: t.custom_image ?: null,
+                                    use_ecr: t.containsKey('use_ecr') ? t.use_ecr : true,
+                                    values: t.values ?: [:]
+                                ]
+                            } else {
+                                error "Unsupported tool entry format: ${t}"
+                            }
+                        }
+
+                        def ecr_map = [:]
+                        if (fileExists('ecr_repo_urls.json')) {
+                            ecr_map = readJSON file: 'ecr_repo_urls.json'
+                        } else {
+                            echo "Warning: no ecr_repo_urls.json found - ECR repos may not exist or Terraform didn't output them."
+                        }
+
+                        def accountId = sh(script: "aws sts get-caller-identity --query Account --output text", returnStdout: true).trim()
+                        echo "AWS Account ID: ${accountId}"
+
+                        sh "helm repo add bitnami https://charts.bitnami.com/bitnami || true"
+                        sh "helm repo update || true"
+
+                        // Docker login to ECR
+                        sh "aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${accountId}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+                        tools.each { tool ->
+                            echo "==== Handling tool: ${tool.name} (chart=${tool.chart}) in ns=${tool.namespace} use_ecr=${tool.use_ecr} ===="
+
+                            // create namespace if missing
+                            sh "kubectl get namespace ${tool.namespace} --kubeconfig kubeconfig.yaml || kubectl create namespace ${tool.namespace} --kubeconfig kubeconfig.yaml"
+
+                            def chart_ref = tool.chart.contains('/') ? tool.chart : "${tool.chart}"
+                            def chart_repo = tool.chart_repo ?: "https://charts.bitnami.com/bitnami"
+                            def image_to_use = tool.custom_image ?: "bitnami/${tool.chart}:latest"
+                            def ecr_repo_url = ecr_map[tool.name] ?: ecr_map[tool.chart] ?: null
+
+                            if (tool.use_ecr && ecr_repo_url) {
+                                echo "Pushing image ${image_to_use} -> ${ecr_repo_url}:latest"
+                                sh """
+                                  set -e
+                                  docker pull ${image_to_use} || true
+                                  docker tag ${image_to_use} ${ecr_repo_url}:latest
+                                  docker push ${ecr_repo_url}:latest
+                                """
+                                image_to_use = "${ecr_repo_url}:latest"
+                            } else {
+                                echo "Using image ${image_to_use} (no push to ECR)"
+                            }
+
+                            def helmCmd = "helm upgrade --install ${tool.name} ${chart_ref} --namespace ${tool.namespace} --create-namespace --wait --repo ${chart_repo}"
+
+                            if (image_to_use) {
+                                def imgParts = image_to_use.tokenize(':')
+                                def imgRepo = imgParts[0]
+                                def imgTag = imgParts.size() > 1 ? imgParts[1] : "latest"
+                                helmCmd += " --set image.repository=${imgRepo} --set image.tag=${imgTag}"
+                            }
+
+                            if (tool.values && tool.values instanceof Map && tool.values.size() > 0) {
+                                def valuesJson = groovy.json.JsonOutput.toJson(tool.values).replace("'", "\\'")
+                                writeFile file: "${tool.name}_values.json", text: valuesJson
+                                helmCmd += " -f ${tool.name}_values.json"
+                            }
+
+                            echo "Running: ${helmCmd}"
+                            sh "${helmCmd}"
+                            echo "Deployed ${tool.name}"
+                        }
+
+                        echo "All requested tools processed."
                     }
                 }
+            }
+        }
 
-                def tools = payload.eks.tools_to_install ?: []
-                if (tools.size() > 0) {
-                    sh "helm repo add bitnami https://charts.bitnami.com/bitnami"
-                    sh "helm repo update"
-                    tools.each { tool ->
-                        echo "Deploying ${tool}..."
-                        sh "helm upgrade --install ${tool} bitnami/${tool} --namespace default --create-namespace --wait"
+        stage('Send Kubeconfig') {
+            when { expression { env.SERVICE_TYPE == 'eks' } }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+                    script {
+                        def payload = readJSON file: 'payload.json'
+                        def clientEmail = payload.client_email
+                        def cluster_name = payload.eks.cluster_name
+
+                        def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
+                        writeFile file: 'kubeconfig.yaml', text: kubeconfig
+
+                        emailext(
+                            to: clientEmail,
+                            subject: "EKS Cluster Access: ${cluster_name}",
+                            body: """
+                            Hello,
+
+                            Your EKS cluster is ready!
+
+                            1. Save attached file as `kubeconfig.yaml`
+                            2. Set environment:
+                               export KUBECONFIG=kubeconfig.yaml
+                            3. Test access:
+                               kubectl get nodes
+
+                            Cluster: ${cluster_name}
+                            Region: ${AWS_DEFAULT_REGION}
+
+                            Cheers,
+                            The Samurai Team
+                            """,
+                            attachmentsPattern: 'kubeconfig.yaml',
+                            mimeType: 'text/plain'
+                        )
+
+                        sh "aws s3 cp kubeconfig.yaml s3://${params.BUCKET}/kubeconfig_${env.TIMESTAMP}.yaml"
                     }
                 }
-                echo "All tools deployed to EKS!"
             }
         }
-    }
-}
 
-stage('Send Kubeconfig') {
-    when { expression { env.SERVICE_TYPE == 'eks' } }
-    steps {
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
-            script {
-                def payload = readJSON file: 'payload.json'
-                def clientEmail = payload.client_email
-                def cluster_name = payload.eks.cluster_name
-
-                def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
-                writeFile file: 'kubeconfig.yaml', text: kubeconfig
-
-                emailext(
-                    to: clientEmail,
-                    subject: "EKS Cluster Access: ${cluster_name}",
-                    body: """
-                    Hello,
-
-                    Your EKS cluster is ready!
-
-                    1. Save attached file as `kubeconfig.yaml`
-                    2. Set environment:
-                       export KUBECONFIG=kubeconfig.yaml
-                    3. Test access:
-                       kubectl get nodes
-
-                    Cluster: ${cluster_name}
-                    Region: ${AWS_DEFAULT_REGION}
-
-                    Cheers,
-                    The Samurai Team
-                    """,
-                    attachmentsPattern: 'kubeconfig.yaml',
-                    mimeType: 'text/plain'
-                )
-
-                sh "aws s3 cp kubeconfig.yaml s3://${params.BUCKET}/kubeconfig_${env.TIMESTAMP}.yaml"
-            }
-        }
-    }
-}
         stage('Send SSH Details') {
             when {
                 expression { env.SERVICE_TYPE == 'ec2' }
             }
             steps {
-                withCredentials([[
+                withCredentials([[ 
                     $class: 'AmazonWebServicesCredentialsBinding',
                     credentialsId: 'aws-terraform-creds',
                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
@@ -334,7 +418,7 @@ stage('Send Kubeconfig') {
         always {
             script {
                 try {
-                    sh 'rm -f /tmp/client-access-key.pem outputs.json client-access-key.pem payload.json inventory.ini ssh_details.json || true'
+                    sh 'rm -f /tmp/client-access-key.pem outputs.json client-access-key.pem payload.json inventory.ini ssh_details.json kubeconfig.yaml ecr_repo_urls.json || true'
                 } catch (Exception e) {
                     echo "Warning: Failed to clean up files: ${e.message}"
                 }
@@ -348,3 +432,4 @@ stage('Send Kubeconfig') {
         }
     }
 }
+
