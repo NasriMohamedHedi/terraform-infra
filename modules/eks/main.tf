@@ -4,11 +4,28 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.70"
     }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.0"
+    }
     null = {
       source  = "hashicorp/null"
       version = "~> 3.0"
     }
   }
+}
+
+# ✅ New Helm provider linked to cluster (for future helm_release use)
+provider "helm" {
+  kubernetes {
+    host                   = try(aws_eks_cluster.cluster[0].endpoint, null)
+    cluster_ca_certificate = try(base64decode(aws_eks_cluster.cluster[0].certificate_authority[0].data), null)
+    token                  = try(data.aws_eks_cluster_auth.cluster.token, null)
+  }
+}
+
+data "aws_eks_cluster_auth" "cluster" {
+  name = try(aws_eks_cluster.cluster[0].name, "")
 }
 
 # Generate unique suffix

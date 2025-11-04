@@ -18,13 +18,11 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
-  # LET AWS FETCH ACCOUNT ID
-  skip_requesting_account_id = false
-  skip_metadata_api_check    = true
-  skip_region_validation     = true
+  skip_requesting_account_id  = false
+  skip_metadata_api_check     = true
+  skip_region_validation      = true
   skip_credentials_validation = true
 
-  # DISABLE TAG READING → NO ListTagsForResource CALLS
   ignore_tags {
     keys         = []
     key_prefixes = []
@@ -65,13 +63,14 @@ locals {
   # EKS
   is_eks = local.payload.service_type == "eks"
 
+  # ✅ FIX: ensure Owner type is consistent (string on both sides)
   eks_config = local.is_eks ? {
     cluster_name       = lookup(local.payload.eks, "cluster_name", null)
     vpc_id             = lookup(local.payload.eks, "vpc_id", null)
     subnet_ids         = lookup(local.payload.eks, "subnet_ids", [])
     use_fargate        = lookup(local.payload.eks, "use_fargate", false)
     fargate_selectors  = lookup(local.payload.eks, "fargate_selectors", [])
-    Owner              = lookup(local.payload.eks, "Owner", null)
+    Owner              = tostring(lookup(local.payload.eks, "Owner", ""))
     tools_to_install   = lookup(local.payload.eks, "tools_to_install", [])
     kubernetes_version = lookup(local.payload.eks, "kubernetes_version", "1.29")
   } : {
@@ -80,7 +79,7 @@ locals {
     subnet_ids         = []
     use_fargate        = false
     fargate_selectors  = []
-    Owner              = null
+    Owner              = ""
     tools_to_install   = []
     kubernetes_version = "1.29"
   }
@@ -89,7 +88,7 @@ locals {
     local.eks_config.cluster_name != null &&
     local.eks_config.vpc_id != null &&
     length(local.eks_config.subnet_ids) > 0 &&
-    local.eks_config.Owner != null
+    local.eks_config.Owner != ""
   ) : true
 }
 
@@ -165,6 +164,7 @@ output "eks_kubeconfig" {
   value     = try(module.eks["eks"].kubeconfig, null)
   sensitive = true
 }
+
 output "eks_ecr_repo_urls" {
   value = try(module.eks["eks"].ecr_repo_urls, null)
 }
