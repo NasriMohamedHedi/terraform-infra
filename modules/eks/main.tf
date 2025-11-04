@@ -1,6 +1,6 @@
 ####################################################
 # modules/eks/main.tf
-# EKS module resources (NO variable / provider / terraform blocks)
+# (resources + outputs only — variables are in variables.tf)
 ####################################################
 
 # Generate unique suffix

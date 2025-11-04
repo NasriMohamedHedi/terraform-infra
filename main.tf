@@ -33,6 +33,7 @@ provider "aws" {
   }
 }
 
+# Defensive helm provider in root - uses module outputs at runtime (try() to avoid init-time errors)
 provider "helm" {
   kubernetes {
     host                   = try(module.eks[0].cluster_endpoint, "")
@@ -63,19 +64,19 @@ locals {
   # EKS
   is_eks = local.payload.service_type == "eks"
 
-  # ✅ FIX: ensure Owner type is consistent (string on both sides)
+  # --- IMPORTANT: both branches must return the same types for each attribute ---
   eks_config = local.is_eks ? {
-    cluster_name       = lookup(local.payload.eks, "cluster_name", null)
-    vpc_id             = lookup(local.payload.eks, "vpc_id", null)
+    cluster_name       = lookup(local.payload.eks, "cluster_name", "")
+    vpc_id             = lookup(local.payload.eks, "vpc_id", "")
     subnet_ids         = lookup(local.payload.eks, "subnet_ids", [])
     use_fargate        = lookup(local.payload.eks, "use_fargate", false)
     fargate_selectors  = lookup(local.payload.eks, "fargate_selectors", [])
-    Owner              = tostring(lookup(local.payload.eks, "Owner", ""))
+    Owner              = tostring(lookup(local.payload.eks, "Owner", ""))   # explicit string
     tools_to_install   = lookup(local.payload.eks, "tools_to_install", [])
     kubernetes_version = lookup(local.payload.eks, "kubernetes_version", "1.29")
   } : {
-    cluster_name       = null
-    vpc_id             = null
+    cluster_name       = ""
+    vpc_id             = ""
     subnet_ids         = []
     use_fargate        = false
     fargate_selectors  = []
@@ -85,14 +86,14 @@ locals {
   }
 
   validate_eks = local.is_eks ? (
-    local.eks_config.cluster_name != null &&
-    local.eks_config.vpc_id != null &&
+    local.eks_config.cluster_name != "" &&
+    local.eks_config.vpc_id != "" &&
     length(local.eks_config.subnet_ids) > 0 &&
     local.eks_config.Owner != ""
   ) : true
 }
 
-# EC2 Key Pair
+# EC2 Key Pair (unchanged)
 resource "random_id" "unique_suffix" {
   count       = local.is_ec2 ? 1 : 0
   byte_length = 4
@@ -115,7 +116,7 @@ output "private_key_pem" {
   sensitive = true
 }
 
-# EC2 Module
+# EC2 module (unchanged)
 module "ec2" {
   source          = "./modules/ec2"
   count           = local.is_ec2 ? 1 : 0
@@ -126,6 +127,7 @@ module "ec2" {
   subnet_id       = local.subnet_id
 }
 
+# EKS module call (unchanged semantics)
 module "eks" {
   source = "./modules/eks"
 
@@ -142,7 +144,7 @@ module "eks" {
   aws_region         = var.aws_region
 }
 
-# Outputs
+# Outputs (use try() to avoid failures when count==0)
 output "ec2_public_ips" {
   value = local.is_ec2 ? module.ec2[0].public_ips : null
 }
