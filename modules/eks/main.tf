@@ -1,49 +1,7 @@
 ####################################################
 # modules/eks/main.tf
-# EKS module: cluster, IAM roles, Fargate profiles, ECR repos and outputs
-# NOTE: Do NOT include terraform{} or provider{} blocks here.
+# EKS module resources (NO variable / provider / terraform blocks)
 ####################################################
-
-variable "cluster_name" {
-  type = string
-}
-
-variable "kubernetes_version" {
-  type    = string
-  default = "1.29"
-}
-
-variable "vpc_id" {
-  type = string
-}
-
-variable "subnet_ids" {
-  type = list(string)
-}
-
-variable "use_fargate" {
-  type    = bool
-  default = false
-}
-
-variable "fargate_selectors" {
-  type = list(object({ namespace = string, labels = optional(map(string), {}) }))
-  default = []
-}
-
-variable "owner_name" {
-  type    = string
-  default = ""
-}
-
-variable "tools_to_install" {
-  type    = list(string)
-  default = []
-}
-
-variable "aws_region" {
-  type = string
-}
 
 # Generate unique suffix
 resource "random_id" "unique_suffix" {

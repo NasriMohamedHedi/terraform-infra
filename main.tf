@@ -33,26 +33,14 @@ provider "aws" {
   }
 }
 
-# Helm provider configured to use the cluster outputs if the module has been created.
-# try() prevents hard failures when module.eks count == 0
 provider "helm" {
   kubernetes {
-    host = try(module.eks[0].cluster_endpoint, "")
-
-    cluster_ca_certificate = try(
-      base64decode(module.eks[0].cluster_certificate_authority_data),
-      ""
-    )
-
+    host                   = try(module.eks[0].cluster_endpoint, "")
+    cluster_ca_certificate = try(base64decode(module.eks[0].cluster_certificate_authority_data), "")
     exec {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "aws"
-      args        = [
-        "eks",
-        "get-token",
-        "--cluster-name",
-        try(module.eks[0].cluster_name, "")
-      ]
+      args        = ["eks", "get-token", "--cluster-name", try(module.eks[0].cluster_name, "")]
     }
   }
 }
@@ -65,7 +53,7 @@ data "aws_s3_object" "payload" {
 locals {
   payload = jsondecode(data.aws_s3_object.payload.body)
 
-  # EC2 (unchanged)
+  # EC2
   is_ec2           = local.payload.service_type == "ec2"
   instance_keys    = local.is_ec2 ? keys(local.payload.instances) : []
   first_instance   = local.is_ec2 && length(local.instance_keys) > 0 ? local.payload.instances[local.instance_keys[0]] : null
@@ -75,7 +63,7 @@ locals {
   # EKS
   is_eks = local.payload.service_type == "eks"
 
-  # Ensure Owner is always a string (fixes inconsistent conditional result types)
+  # ✅ FIX: ensure Owner type is consistent (string on both sides)
   eks_config = local.is_eks ? {
     cluster_name       = lookup(local.payload.eks, "cluster_name", null)
     vpc_id             = lookup(local.payload.eks, "vpc_id", null)
@@ -104,7 +92,7 @@ locals {
   ) : true
 }
 
-# EC2 Key Pair (unchanged)
+# EC2 Key Pair
 resource "random_id" "unique_suffix" {
   count       = local.is_ec2 ? 1 : 0
   byte_length = 4
@@ -127,7 +115,7 @@ output "private_key_pem" {
   sensitive = true
 }
 
-# EC2 Module (unchanged)
+# EC2 Module
 module "ec2" {
   source          = "./modules/ec2"
   count           = local.is_ec2 ? 1 : 0
@@ -138,7 +126,6 @@ module "ec2" {
   subnet_id       = local.subnet_id
 }
 
-# EKS Module (clean module, module must NOT have provider{} or terraform{} blocks)
 module "eks" {
   source = "./modules/eks"
 
@@ -155,7 +142,7 @@ module "eks" {
   aws_region         = var.aws_region
 }
 
-# Outputs (defensive: only read module outputs if count==1)
+# Outputs
 output "ec2_public_ips" {
   value = local.is_ec2 ? module.ec2[0].public_ips : null
 }
@@ -165,15 +152,15 @@ output "ec2_instance_ids" {
 }
 
 output "eks_cluster_name" {
-  value = local.is_eks ? try(module.eks[0].cluster_name, null) : null
+  value = try(module.eks[0].cluster_name, null)
 }
 
 output "eks_kubeconfig" {
-  value     = local.is_eks ? try(module.eks[0].kubeconfig, null) : null
+  value     = try(module.eks[0].kubeconfig, null)
   sensitive = true
 }
 
 output "eks_ecr_repo_urls" {
-  value = local.is_eks ? try(module.eks[0].ecr_repo_urls, null) : null
+  value = try(module.eks[0].ecr_repo_urls, null)
 }
 
