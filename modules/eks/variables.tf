@@ -55,3 +55,9 @@ variable "aws_region" {
   default     = "eu-central-1"
 }
 
+variable "create_ecr_repos" {
+  description = "Whether to create ECR repositories for the listed tools"
+  type        = bool
+  default     = false
+}
+
