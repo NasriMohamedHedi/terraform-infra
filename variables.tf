@@ -20,10 +20,10 @@ variable "jenkins_url" {
   default     = "https://9216d38c2a3f.ngrok-free.app"
 }
 
-# NEW: toggle ECR repo creation (set to false while debugging/prototyping Jenkins user permissions)
+# Toggle: set false to avoid creating/reading ECR repos (use your manual ECR repos)
 variable "create_ecr_repos" {
-  description = "When false, module.eks will not create/read ECR repositories (useful if Jenkins IAM lacks ECR permissions)"
+  description = "When false, module.eks will not create/read ECR repositories"
   type        = bool
-  default     = true
+  default     = false
 }
 

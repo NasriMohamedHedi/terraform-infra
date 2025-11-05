@@ -53,25 +53,19 @@ data "aws_s3_object" "payload" {
 
 locals {
   payload = jsondecode(data.aws_s3_object.payload.body)
-
-  # defensive default: ensure payload.eks exists and is an object/map
   payload_eks = try(local.payload.eks, {})
 
-  # EC2 (unchanged behavior)
   is_ec2           = local.payload.service_type == "ec2"
   instance_keys    = local.is_ec2 ? keys(local.payload.instances) : []
   first_instance   = local.is_ec2 && length(local.instance_keys) > 0 ? local.payload.instances[local.instance_keys[0]] : null
   subnet_id        = local.first_instance != null ? lookup(local.first_instance, "subnet_id", null) : null
   security_groups  = local.first_instance != null ? lookup(local.first_instance, "security_groups", []) : []
 
-  # EKS flags & defensive parsing
   is_eks = local.payload.service_type == "eks"
 
-  # normalize subnet_ids -> list(string)
   eks_subnet_ids_raw = lookup(local.payload_eks, "subnet_ids", [])
   eks_subnet_ids = [for id in local.eks_subnet_ids_raw : tostring(id)]
 
-  # normalize fargate selectors to object list { namespace, labels = map(string) }
   eks_fargate_raw = lookup(local.payload_eks, "fargate_selectors", [])
   eks_fargate_selectors = [
     for s in local.eks_fargate_raw : {
@@ -80,7 +74,6 @@ locals {
     }
   ]
 
-  # normalize tools_to_install -> list(string)
   eks_tools_raw = lookup(local.payload_eks, "tools_to_install", [])
   eks_tools = [
     for t in local.eks_tools_raw :
@@ -160,7 +153,7 @@ module "eks" {
   tools_to_install   = local.eks_config.tools_to_install
   aws_region         = var.aws_region
 
-  # new optional toggle — set to false to avoid creating/reading ECR repos
+  # do not create ecr repos by default (avoid Jenkins IAM ECR requirement)
   create_ecr_repos   = var.create_ecr_repos
 }
 
