@@ -164,11 +164,13 @@ resource "aws_eks_fargate_profile" "fargate_profile" {
 }
 
 # Create ECR repos for each tool (private repos)
+# If create_ecr_repos is false, this for_each becomes an empty set and nothing is created (and Terraform won't call the ECR APIs here).
 resource "aws_ecr_repository" "tool_repo" {
-  for_each = toset(var.tools_to_install)
-  name     = "${var.cluster_name}-${each.value}"
+  for_each = toset(var.create_ecr_repos ? var.tools_to_install : [])
 
+  name     = "${var.cluster_name}-${each.value}"
   image_tag_mutability = "MUTABLE"
+
   image_scanning_configuration {
     scan_on_push = false
   }
@@ -204,8 +206,13 @@ output "fargate_profile_names" {
   value = try(aws_eks_fargate_profile.fargate_profile[*].fargate_profile_name, [])
 }
 
+# safe conditional output for ECR repo URLs
+locals {
+  ecr_repo_urls = var.create_ecr_repos ? { for k, r in aws_ecr_repository.tool_repo : k => r.repository_url } : {}
+}
+
 output "ecr_repo_urls" {
-  value = { for k, r in aws_ecr_repository.tool_repo : k => r.repository_url }
+  value = local.ecr_repo_urls
 }
 
 output "kubeconfig" {

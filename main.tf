@@ -159,6 +159,9 @@ module "eks" {
   owner_name         = local.eks_config.Owner
   tools_to_install   = local.eks_config.tools_to_install
   aws_region         = var.aws_region
+
+  # new optional toggle — set to false to avoid creating/reading ECR repos
+  create_ecr_repos   = var.create_ecr_repos
 }
 
 # Outputs
