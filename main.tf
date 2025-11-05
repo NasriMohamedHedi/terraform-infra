@@ -43,12 +43,12 @@ provider "aws" {
 # It references module outputs using try() to avoid hard failures during init.
 provider "helm" {
   kubernetes {
-    host                   = try(module.eks[0].cluster_endpoint, "")
-    cluster_ca_certificate = try(base64decode(module.eks[0].cluster_certificate_authority_data), "")
+    host                   = try(module.eks["eks"].cluster_endpoint, "")
+    cluster_ca_certificate = try(base64decode(module.eks["eks"].cluster_certificate_authority_data), "")
     exec {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "aws"
-      args        = ["eks", "get-token", "--cluster-name", try(module.eks[0].cluster_name, "")]
+      args        = ["eks", "get-token", "--cluster-name", try(module.eks["eks"].cluster_name, "")]
     }
   }
 }
@@ -151,25 +151,27 @@ module "ec2" {
   subnet_id       = local.subnet_id
 }
 
-# EKS Module (normalized inputs)
+# EKS Module (normalized inputs) — instantiate with for_each to keep stable address module.eks["eks"]
 module "eks" {
   source = "./modules/eks"
 
-  count = local.is_eks && local.validate_eks ? 1 : 0
+  # when payload contains eks, create a single keyed module with key "eks" so old state addresses match
+  for_each = local.is_eks && local.validate_eks ? { "eks" = local.eks_config } : {}
 
-  cluster_name       = local.eks_config.cluster_name
-  kubernetes_version = local.eks_config.kubernetes_version
-  vpc_id             = local.eks_config.vpc_id
-  subnet_ids         = local.eks_config.subnet_ids
-  use_fargate        = local.eks_config.use_fargate
-  fargate_selectors  = local.eks_config.use_fargate ? local.eks_config.fargate_selectors : []
-  owner_name         = local.eks_config.Owner
-  tools_to_install   = local.eks_config.tools_to_install
+  cluster_name       = each.value.cluster_name
+  kubernetes_version = each.value.kubernetes_version
+  vpc_id             = each.value.vpc_id
+  subnet_ids         = each.value.subnet_ids
+  use_fargate        = each.value.use_fargate
+  fargate_selectors  = each.value.fargate_selectors
+  owner_name         = each.value.Owner
+  tools_to_install   = each.value.tools_to_install
   aws_region         = var.aws_region
 
   # new optional toggle — set to false to avoid creating/reading ECR repos
   create_ecr_repos   = var.create_ecr_repos
 }
+
 
 # Outputs
 output "ec2_public_ips" {
@@ -181,15 +183,15 @@ output "ec2_instance_ids" {
 }
 
 output "eks_cluster_name" {
-  value = try(module.eks[0].cluster_name, null)
+  value = try(module.eks["eks"].cluster_name, null)
 }
 
 output "eks_kubeconfig" {
-  value     = try(module.eks[0].kubeconfig, null)
+  value     = try(module.eks["eks"].kubeconfig, null)
   sensitive = true
 }
 
 output "eks_ecr_repo_urls" {
-  value = try(module.eks[0].ecr_repo_urls, null)
+  value = try(module.eks["eks"].ecr_repo_urls, null)
 }
 
