@@ -1,13 +1,18 @@
 terraform {
+  required_version = ">= 1.4.0, < 2.0.0"
+
   required_providers {
+    # Pin to 5.x so we avoid provider 6.x breaking changes with legacy state
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.70"
+      version = ">= 5.70, < 6.0"
     }
+
     helm = {
       source  = "hashicorp/helm"
       version = "~> 2.0"
     }
+
     null = {
       source  = "hashicorp/null"
       version = "~> 3.0"
@@ -18,6 +23,7 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
+  # keep these "skip" flags if you need terraform to run in CI without metadata checks
   skip_requesting_account_id  = false
   skip_metadata_api_check     = true
   skip_region_validation      = true
@@ -33,7 +39,8 @@ provider "aws" {
   }
 }
 
-# defensive helm provider in root (safe when cluster not yet created)
+# Defensive helm provider in root (safe when cluster not yet created).
+# It references module outputs using try() to avoid hard failures during init.
 provider "helm" {
   kubernetes {
     host                   = try(module.eks[0].cluster_endpoint, "")
@@ -53,19 +60,25 @@ data "aws_s3_object" "payload" {
 
 locals {
   payload = jsondecode(data.aws_s3_object.payload.body)
+
+  # defensive default: ensure payload.eks exists and is an object/map
   payload_eks = try(local.payload.eks, {})
 
+  # EC2 (unchanged behavior)
   is_ec2           = local.payload.service_type == "ec2"
   instance_keys    = local.is_ec2 ? keys(local.payload.instances) : []
   first_instance   = local.is_ec2 && length(local.instance_keys) > 0 ? local.payload.instances[local.instance_keys[0]] : null
   subnet_id        = local.first_instance != null ? lookup(local.first_instance, "subnet_id", null) : null
   security_groups  = local.first_instance != null ? lookup(local.first_instance, "security_groups", []) : []
 
+  # EKS flags & defensive parsing
   is_eks = local.payload.service_type == "eks"
 
+  # normalize subnet_ids -> list(string)
   eks_subnet_ids_raw = lookup(local.payload_eks, "subnet_ids", [])
   eks_subnet_ids = [for id in local.eks_subnet_ids_raw : tostring(id)]
 
+  # normalize fargate selectors to object list { namespace, labels = map(string) }
   eks_fargate_raw = lookup(local.payload_eks, "fargate_selectors", [])
   eks_fargate_selectors = [
     for s in local.eks_fargate_raw : {
@@ -74,6 +87,7 @@ locals {
     }
   ]
 
+  # normalize tools_to_install -> list(string)
   eks_tools_raw = lookup(local.payload_eks, "tools_to_install", [])
   eks_tools = [
     for t in local.eks_tools_raw :
@@ -153,7 +167,7 @@ module "eks" {
   tools_to_install   = local.eks_config.tools_to_install
   aws_region         = var.aws_region
 
-  # do not create ecr repos by default (avoid Jenkins IAM ECR requirement)
+  # new optional toggle — set to false to avoid creating/reading ECR repos
   create_ecr_repos   = var.create_ecr_repos
 }
 

@@ -1,36 +1,29 @@
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.70"
-    }
-    null = {
-      source  = "hashicorp/null"
-      version = "~> 3.0"
-    }
-  }
-}
+# NOTE: removed 'terraform { required_providers { ... } }' block from module.
+# Modules must not set provider requirements. Root module controls provider versions.
 
+# data "aws_eks_cluster_auth" "cluster" remains (it will be used when cluster exists)
 data "aws_eks_cluster_auth" "cluster" {
   name = try(aws_eks_cluster.cluster[0].name, "")
 }
 
+# Generate unique suffix
 resource "random_id" "unique_suffix" {
   byte_length = 4
   keepers = { cluster_name = var.cluster_name }
 }
 
+# IAM Role for EKS Cluster
 resource "aws_iam_role" "eks_cluster_role" {
   count = var.cluster_name != "" ? 1 : 0
   name  = "${var.cluster_name}-eks-cluster-role-${random_id.unique_suffix.hex}"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
+    Statement = [ {
       Action    = "sts:AssumeRole"
       Effect    = "Allow"
       Principal = { Service = "eks.amazonaws.com" }
-    }]
+    } ]
   })
 
   lifecycle {
@@ -58,6 +51,7 @@ resource "aws_iam_role_policy_attachment" "eks_service_policy" {
   }
 }
 
+# Security Group
 resource "aws_security_group" "eks_cluster" {
   count       = var.cluster_name != "" ? 1 : 0
   name_prefix = "${var.cluster_name}-sg-"
@@ -83,6 +77,7 @@ resource "aws_security_group" "eks_cluster" {
   }
 }
 
+# EKS Cluster
 resource "aws_eks_cluster" "cluster" {
   count    = var.cluster_name != "" && length(var.subnet_ids) > 0 ? 1 : 0
   name     = var.cluster_name
@@ -100,6 +95,7 @@ resource "aws_eks_cluster" "cluster" {
   ]
 }
 
+# Fargate Pod Execution Role
 resource "aws_iam_role" "fargate_pod_execution_role" {
   count = var.cluster_name != "" && var.use_fargate ? 1 : 0
   name  = "${var.cluster_name}-fargate-pod-execution-role-${random_id.unique_suffix.hex}"
@@ -128,6 +124,7 @@ resource "aws_iam_role_policy_attachment" "fargate_pod_execution_policy" {
   }
 }
 
+# Add ECR read permissions for pods running on Fargate so pods can pull images from private ECR.
 resource "aws_iam_role_policy_attachment" "fargate_ecr_read" {
   count      = var.cluster_name != "" && var.use_fargate ? 1 : 0
   role       = aws_iam_role.fargate_pod_execution_role[0].name
@@ -138,6 +135,7 @@ resource "aws_iam_role_policy_attachment" "fargate_ecr_read" {
   }
 }
 
+# Fargate Profiles
 resource "aws_eks_fargate_profile" "fargate_profile" {
   count                 = var.use_fargate && length(var.fargate_selectors) > 0 ? length(var.fargate_selectors) : 0
   cluster_name          = aws_eks_cluster.cluster[0].name
@@ -153,11 +151,13 @@ resource "aws_eks_fargate_profile" "fargate_profile" {
   depends_on = [aws_eks_cluster.cluster]
 }
 
+# Create ECR repos for each tool (private repos)
+# If create_ecr_repos is false, this for_each becomes an empty set and nothing is created.
 resource "aws_ecr_repository" "tool_repo" {
   for_each = toset(var.create_ecr_repos ? var.tools_to_install : [])
 
-  name     = "${var.cluster_name}-${each.value}"
-  image_tag_mutability = "MUTABLE"
+  name                  = "${var.cluster_name}-${each.value}"
+  image_tag_mutability  = "MUTABLE"
 
   image_scanning_configuration {
     scan_on_push = false
@@ -166,13 +166,11 @@ resource "aws_ecr_repository" "tool_repo" {
   tags = {}
 
   lifecycle {
-    ignore_changes = [
-      tags,
-      tags_all
-    ]
+    ignore_changes = [ tags, tags_all ]
   }
 }
 
+# Outputs
 output "cluster_name" {
   value = try(aws_eks_cluster.cluster[0].name, null)
 }
@@ -193,6 +191,7 @@ output "fargate_profile_names" {
   value = try(aws_eks_fargate_profile.fargate_profile[*].fargate_profile_name, [])
 }
 
+# safe conditional output for ECR repo URLs
 locals {
   ecr_repo_urls = var.create_ecr_repos ? { for k, r in aws_ecr_repository.tool_repo : k => r.repository_url } : {}
 }
