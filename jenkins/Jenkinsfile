@@ -112,14 +112,6 @@ pipeline {
             }
         }
 
-		stage('Terraform Refresh State') {
-	  steps {
-	    sh '''
-	      terraform init -reconfigure
-	      terraform refresh -auto-approve || true
-	    '''
-	  }
-	}
 
         stage('Terraform Apply') {
             steps {
