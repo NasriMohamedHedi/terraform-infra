@@ -146,47 +146,64 @@ pipeline {
             }
         }
 
-        stage('Deploy Tools on EKS') {
-            when { expression { env.SERVICE_TYPE == 'eks' } }
-            steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
-                    script {
-                        def payload = readJSON file: 'payload.json'
-                        def cluster_name = payload.eks.cluster_name
+stage('Deploy Tools on EKS') {
+    when { expression { env.SERVICE_TYPE == 'eks' } }
+    steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+            script {
+                def payload = readJSON file: 'payload.json'
+                def cluster_name = payload.eks.cluster_name
 
-                        echo "☸ Deploying tools to EKS Cluster: ${cluster_name}"
+                echo "☸ Deploying tools to EKS Cluster: ${cluster_name}"
 
-                        def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
-                        writeFile file: 'kubeconfig.yaml', text: kubeconfig
-                        env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
+                // Retrieve kubeconfig from Terraform output
+                def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
+                writeFile file: 'kubeconfig.yaml', text: kubeconfig
+                env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
-                        sh "aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin 430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+                // Authenticate to ECR
+                sh """
+                    aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
+                    docker login --username AWS --password-stdin 430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+                """
 
-                        payload.eks.tools_to_install.each { tool ->
-                            def chartRepo = tool.chart_repo ?: "https://charts.bitnami.com/bitnami"
-                            def imageRepo = tool.ecr_repo_url ?: "bitnami/${tool.chart}"
-                            def namespace = tool.namespace ?: "default"
+                // Update Helm repos before installation
+                sh "helm repo update || true"
 
-                            echo "📦 Installing ${tool.name} → ${namespace}"
+                // Deploy each tool defined in the payload
+                payload.eks.tools_to_install.each { tool ->
+                    def chartRepo = tool.chart_repo ?: "https://charts.bitnami.com/bitnami"
+                    def imageRepo = tool.ecr_repo_url ?: "bitnami/${tool.chart}"
+                    def namespace = tool.namespace ?: "default"
 
-                            sh """
-                                helm repo add ${tool.name} ${chartRepo} || true
-                                helm repo update
-                                kubectl get ns ${namespace} || kubectl create ns ${namespace}
-                                helm upgrade --install ${tool.name} ${tool.chart} \
-                                  --namespace ${namespace} \
-                                  --repo ${chartRepo} \
-                                  --set image.repository=${imageRepo} \
-                                  --set image.tag=latest \
-                                  --wait
-                            """
-                        }
+                    echo "📦 Installing ${tool.name} → ${namespace}"
 
-                        echo "✅ All tools deployed successfully on ${cluster_name}"
-                    }
+                    sh """
+                        helm repo add ${tool.name} ${chartRepo} || true
+                        helm repo update
+
+                        # Create namespace if it doesn't exist
+                        kubectl get ns ${namespace} || kubectl create ns ${namespace}
+
+                        # Extract only the chart name (remove repo prefix like grafana/ or prom/)
+                        chart_name=\$(echo "${tool.chart}" | awk -F'/' '{print \$NF}')
+
+                        # Install or upgrade the tool
+                        helm upgrade --install ${tool.name} "\$chart_name" \
+                          --namespace ${namespace} \
+                          --repo ${chartRepo} \
+                          --set image.repository=${imageRepo} \
+                          --set image.tag=latest \
+                          --wait
+                    """
                 }
+
+                echo "✅ All tools deployed successfully on ${cluster_name}"
             }
         }
+    }
+}
+
 
         stage('Send Kubeconfig via Email') {
             when { expression { env.SERVICE_TYPE == 'eks' } }
