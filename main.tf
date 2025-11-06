@@ -2,10 +2,10 @@ terraform {
   required_version = ">= 1.4.0, < 2.0.0"
 
   required_providers {
-    # Pin to 5.x so we avoid provider 6.x breaking changes with legacy state
+    # Allow AWS provider 6.x (>= 6.2.0) to pick up the state-decoding fix
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.70, < 6.0"
+      version = ">= 6.2, < 7.0"
     }
 
     helm = {
@@ -171,7 +171,6 @@ module "eks" {
   # new optional toggle — set to false to avoid creating/reading ECR repos
   create_ecr_repos   = var.create_ecr_repos
 }
-
 
 # Outputs
 output "ec2_public_ips" {
