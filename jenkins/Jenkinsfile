@@ -161,14 +161,14 @@ stage('Deploy Tools on EKS') {
                 writeFile file: 'kubeconfig.yaml', text: kubeconfig
                 env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
-                // Login to ECR (so helm/chart pulls and local docker login succeed)
-                sh """
+                // Login to ECR
+                sh '''
                     aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
                     docker login --username AWS --password-stdin 430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
-                """
+                '''
 
-                // Add common repos and update with retries (network can be flaky)
-                sh """
+                // Add common repos and update with retries
+                sh '''
                     helm repo add grafana https://grafana.github.io/helm-charts || true
                     helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
 
@@ -188,14 +188,13 @@ stage('Deploy Tools on EKS') {
                     fi
 
                     helm repo list
-                """
+                '''
 
                 // ensure namespace
-                sh "kubectl get ns monitoring || kubectl create ns monitoring"
+                sh 'kubectl get ns monitoring || kubectl create ns monitoring'
 
-                // create image pull secret using command substitution (kubectl doesn't accept --docker-password-stdin)
-                sh """
-                    # create secret if not exists (uses aws ecr get-login-password)
+                // create image pull secret
+                sh '''
                     kubectl get secret ecr-creds -n monitoring >/dev/null 2>&1 || \
                     kubectl create secret docker-registry ecr-creds \
                       --docker-server=430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com \
@@ -203,11 +202,10 @@ stage('Deploy Tools on EKS') {
                       --docker-password="$(aws ecr get-login-password --region ${AWS_DEFAULT_REGION})" \
                       --namespace monitoring
 
-                    # patch default serviceaccount in monitoring so pods pick the imagePullSecret (idempotent)
                     kubectl patch serviceaccount default -n monitoring -p '{"imagePullSecrets":[{"name":"ecr-creds"}]}' || true
-                """
+                '''
 
-                // tools list - adjust as needed or generate from payload
+                // tools list
                 def tools = [
                     [
                         name: "prometheus",
@@ -226,25 +224,25 @@ stage('Deploy Tools on EKS') {
                 ]
 
                 tools.each { tool ->
-                    def chartRef = tool.chart.contains('/') ? tool.chart : "${tool.chart}"
+                    def chartRef = tool.chart
                     def relName = tool.name
                     def ns = tool.namespace
                     def imageRepo = tool.imageRepo
 
                     echo "📦 Installing ${relName} in namespace ${ns} (chart=${chartRef})"
 
-                    // sanity check: show search results and repo info
-                    sh """
+                    // sanity check
+                    sh '''
                         echo "---- helm search repo for ${chartRef} ----"
                         helm search repo ${chartRef} || true
                         echo "---- helm show chart (attempt) ----"
                         helm show chart ${chartRef} --repo ${tool.repo} || true
-                    """
+                    '''
 
-                    // install with retries and debug flags to capture details
+                    // install with retries
                     def installCmd = "helm upgrade --install ${relName} ${chartRef} --namespace ${ns} --repo ${tool.repo} --set image.repository=${imageRepo} --set image.tag=latest --set image.pullPolicy=Always --wait --timeout 15m --debug"
 
-                    sh """
+                    sh '''
                         attempt=0
                         until [ $attempt -ge 3 ]
                         do
@@ -264,7 +262,7 @@ stage('Deploy Tools on EKS') {
                           kubectl describe pod -n ${ns} || true
                           exit 1
                         fi
-                    """
+                    '''
                 }
 
                 echo "✅ All tools deployed successfully on ${cluster_name}"
@@ -272,6 +270,7 @@ stage('Deploy Tools on EKS') {
         }
     }
 }
+
 
 
 
