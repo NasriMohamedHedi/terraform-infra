@@ -153,6 +153,8 @@ stage('Deploy Tools on EKS') {
             script {
                 def payload = readJSON file: 'payload.json'
                 def cluster_name = payload.eks.cluster_name
+                def ecrBase = "430118831270.dkr.ecr." + env.AWS_DEFAULT_REGION + ".amazonaws.com"
+
                 echo "☸ Deploying tools to EKS Cluster: ${cluster_name}"
 
                 // kubeconfig
@@ -163,7 +165,7 @@ stage('Deploy Tools on EKS') {
                 // Login to ECR
                 sh """
                     aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
-                    docker login --username AWS --password-stdin 430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+                    docker login --username AWS --password-stdin ${ecrBase}
                 """
 
                 // Add repos
@@ -174,14 +176,13 @@ stage('Deploy Tools on EKS') {
                     helm repo list
                 """
 
-                // Namespace
-                sh "kubectl get ns monitoring || kubectl create ns monitoring"
-
-                // ImagePullSecret for ECR
+                // Namespace and ECR secret
                 sh """
+                    kubectl get ns monitoring || kubectl create ns monitoring
+
                     kubectl get secret ecr-creds -n monitoring >/dev/null 2>&1 || \
                     kubectl create secret docker-registry ecr-creds \
-                      --docker-server=430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com \
+                      --docker-server=${ecrBase} \
                       --docker-username=AWS \
                       --docker-password="$(aws ecr get-login-password --region ${AWS_DEFAULT_REGION})" \
                       --namespace monitoring
@@ -190,35 +191,32 @@ stage('Deploy Tools on EKS') {
                       -p '{"imagePullSecrets":[{"name":"ecr-creds"}]}' || true
                 """
 
-                // tools definitions (ECR-only images)
                 def tools = [
                     [
                         name: "prometheus",
                         repo: "https://prometheus-community.github.io/helm-charts",
                         chart: "prometheus",
-                        imageRepo: "430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/prometheus",
+                        imageRepo: ecrBase + "/prometheus",
                         namespace: "monitoring"
                     ],
                     [
                         name: "grafana",
                         repo: "https://grafana.github.io/helm-charts",
                         chart: "grafana",
-                        imageRepo: "430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/grafana",
+                        imageRepo: ecrBase + "/grafana",
                         namespace: "monitoring"
                     ]
                 ]
 
-                // Loop through tools
                 tools.each { tool ->
                     def ns = tool.namespace
-                    def chartRef = tool.chart
                     def relName = tool.name
+                    def chartRef = tool.chart
                     def imageRepo = tool.imageRepo
 
-                    echo "📦 Installing ${relName} from ECR image: ${imageRepo}:latest"
-
-                    // Each chart can have different image path key; handle dynamically
                     def imageKey = (relName == "grafana") ? "image.repository" : "server.image.repository"
+
+                    echo "📦 Installing ${relName} using image ${imageRepo}:latest"
 
                     def installCmd = """
                         helm upgrade --install ${relName} ${chartRef} \
@@ -231,7 +229,6 @@ stage('Deploy Tools on EKS') {
                         --wait --timeout 15m --debug
                     """
 
-                    // Retry logic
                     sh """
                         attempt=0
                         until [ \$attempt -ge 3 ]; do
