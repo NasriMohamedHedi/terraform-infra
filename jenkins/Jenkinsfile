@@ -153,7 +153,6 @@ stage('Deploy Tools on EKS') {
             script {
                 def payload = readJSON file: 'payload.json'
                 def cluster_name = payload.eks.cluster_name
-
                 echo "☸ Deploying tools to EKS Cluster: ${cluster_name}"
 
                 // kubeconfig
@@ -162,39 +161,24 @@ stage('Deploy Tools on EKS') {
                 env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
                 // Login to ECR
-                sh '''
+                sh """
                     aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
                     docker login --username AWS --password-stdin 430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
-                '''
+                """
 
-                // Add common repos and update with retries
-                sh '''
+                // Add repos
+                sh """
                     helm repo add grafana https://grafana.github.io/helm-charts || true
                     helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
-
-                    attempt=0
-                    until [ $attempt -ge 5 ]
-                    do
-                      helm repo update && break
-                      attempt=$((attempt+1))
-                      echo "helm repo update failed, retry #$attempt — sleeping 5s"
-                      sleep 5
-                    done
-
-                    if [ $attempt -ge 5 ]; then
-                      echo "helm repo update failed after retries"
-                      helm repo list
-                      exit 1
-                    fi
-
+                    helm repo update
                     helm repo list
-                '''
+                """
 
-                // ensure namespace
-                sh 'kubectl get ns monitoring || kubectl create ns monitoring'
+                // Namespace
+                sh "kubectl get ns monitoring || kubectl create ns monitoring"
 
-                // create image pull secret
-                sh '''
+                // ImagePullSecret for ECR
+                sh """
                     kubectl get secret ecr-creds -n monitoring >/dev/null 2>&1 || \
                     kubectl create secret docker-registry ecr-creds \
                       --docker-server=430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com \
@@ -202,74 +186,76 @@ stage('Deploy Tools on EKS') {
                       --docker-password="$(aws ecr get-login-password --region ${AWS_DEFAULT_REGION})" \
                       --namespace monitoring
 
-                    kubectl patch serviceaccount default -n monitoring -p '{"imagePullSecrets":[{"name":"ecr-creds"}]}' || true
-                '''
+                    kubectl patch serviceaccount default -n monitoring \
+                      -p '{"imagePullSecrets":[{"name":"ecr-creds"}]}' || true
+                """
 
-                // tools list
+                // tools definitions (ECR-only images)
                 def tools = [
                     [
                         name: "prometheus",
                         repo: "https://prometheus-community.github.io/helm-charts",
                         chart: "prometheus",
-                        imageRepo: "430118831270.dkr.ecr.eu-central-1.amazonaws.com/prometheus",
+                        imageRepo: "430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/prometheus",
                         namespace: "monitoring"
                     ],
                     [
                         name: "grafana",
                         repo: "https://grafana.github.io/helm-charts",
                         chart: "grafana",
-                        imageRepo: "430118831270.dkr.ecr.eu-central-1.amazonaws.com/grafana",
+                        imageRepo: "430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/grafana",
                         namespace: "monitoring"
                     ]
                 ]
 
+                // Loop through tools
                 tools.each { tool ->
+                    def ns = tool.namespace
                     def chartRef = tool.chart
                     def relName = tool.name
-                    def ns = tool.namespace
                     def imageRepo = tool.imageRepo
 
-                    echo "📦 Installing ${relName} in namespace ${ns} (chart=${chartRef})"
+                    echo "📦 Installing ${relName} from ECR image: ${imageRepo}:latest"
 
-                    // sanity check
-                    sh '''
-                        echo "---- helm search repo for ${chartRef} ----"
-                        helm search repo ${chartRef} || true
-                        echo "---- helm show chart (attempt) ----"
-                        helm show chart ${chartRef} --repo ${tool.repo} || true
-                    '''
+                    // Each chart can have different image path key; handle dynamically
+                    def imageKey = (relName == "grafana") ? "image.repository" : "server.image.repository"
 
-                    // install with retries
-                    def installCmd = "helm upgrade --install ${relName} ${chartRef} --namespace ${ns} --repo ${tool.repo} --set image.repository=${imageRepo} --set image.tag=latest --set image.pullPolicy=Always --wait --timeout 15m --debug"
+                    def installCmd = """
+                        helm upgrade --install ${relName} ${chartRef} \
+                        --namespace ${ns} \
+                        --repo ${tool.repo} \
+                        --set ${imageKey}=${imageRepo} \
+                        --set image.tag=latest \
+                        --set image.pullPolicy=Always \
+                        --set global.imagePullSecrets[0].name=ecr-creds \
+                        --wait --timeout 15m --debug
+                    """
 
-                    sh '''
+                    // Retry logic
+                    sh """
                         attempt=0
-                        until [ $attempt -ge 3 ]
-                        do
+                        until [ \$attempt -ge 3 ]; do
                           echo "Running: ${installCmd}"
                           ${installCmd} && break
-                          attempt=$((attempt+1))
-                          echo "helm install for ${relName} failed (attempt $attempt). Dumping helm status and waiting 10s before retry."
-                          helm status ${relName} -n ${ns} || true
-                          kubectl get events -n ${ns} --sort-by='.lastTimestamp' | tail -n 20 || true
+                          attempt=\$((attempt+1))
+                          echo "helm install failed (attempt \$attempt), retrying in 10s..."
                           sleep 10
                         done
-
-                        if [ $attempt -ge 3 ]; then
-                          echo "helm install for ${relName} failed after retries — printing debug info"
+                        if [ \$attempt -ge 3 ]; then
+                          echo "❌ helm install for ${relName} failed after retries"
                           helm status ${relName} -n ${ns} || true
-                          kubectl get all -n ${ns} || true
-                          kubectl describe pod -n ${ns} || true
+                          kubectl get pods -n ${ns} || true
                           exit 1
                         fi
-                    '''
+                    """
                 }
 
-                echo "✅ All tools deployed successfully on ${cluster_name}"
+                echo "✅ All tools deployed successfully from ECR on ${cluster_name}"
             }
         }
     }
 }
+
 
 
 
