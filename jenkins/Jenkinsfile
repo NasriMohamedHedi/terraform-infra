@@ -161,40 +161,65 @@ stage('Deploy Tools on EKS') {
                 writeFile file: 'kubeconfig.yaml', text: kubeconfig
                 env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
-                // Authenticate to ECR
+                // Login to ECR
                 sh """
                     aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
                     docker login --username AWS --password-stdin 430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
                 """
 
-                // Update Helm repos before installation
-                sh "helm repo update || true"
+                // Make sure Helm repos are added correctly
+                sh """
+                    helm repo add grafana https://grafana.github.io/helm-charts || true
+                    helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
+                    helm repo update
+                """
 
-                // Deploy each tool defined in the payload
-                payload.eks.tools_to_install.each { tool ->
-                    def chartRepo = tool.chart_repo ?: "https://charts.bitnami.com/bitnami"
-                    def imageRepo = tool.ecr_repo_url ?: "bitnami/${tool.chart}"
-                    def namespace = tool.namespace ?: "default"
+                // Ensure the monitoring namespace exists
+                sh "kubectl get ns monitoring || kubectl create ns monitoring"
 
-                    echo "📦 Installing ${tool.name} → ${namespace}"
+                // Create secret for private ECR if not exists
+                sh """
+                    aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
+                    kubectl create secret docker-registry ecr-creds \
+                        --docker-server=430118831270.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com \
+                        --docker-username=AWS \
+                        --docker-password-stdin \
+                        --namespace monitoring || true
+
+                    kubectl patch serviceaccount default \
+                      -n monitoring \
+                      -p '{"imagePullSecrets": [{"name": "ecr-creds"}]}' || true
+                """
+
+                // Deploy Prometheus and Grafana using private ECR images
+                def tools = [
+                    [
+                        name: "prometheus",
+                        repo: "https://prometheus-community.github.io/helm-charts",
+                        chart: "prometheus",
+                        imageRepo: "430118831270.dkr.ecr.eu-central-1.amazonaws.com/prometheus",
+                        namespace: "monitoring"
+                    ],
+                    [
+                        name: "grafana",
+                        repo: "https://grafana.github.io/helm-charts",
+                        chart: "grafana",
+                        imageRepo: "430118831270.dkr.ecr.eu-central-1.amazonaws.com/grafana",
+                        namespace: "monitoring"
+                    ]
+                ]
+
+                tools.each { tool ->
+                    echo "📦 Installing ${tool.name} in namespace ${tool.namespace}"
 
                     sh """
-                        helm repo add ${tool.name} ${chartRepo} || true
-                        helm repo update
-
-                        # Create namespace if it doesn't exist
-                        kubectl get ns ${namespace} || kubectl create ns ${namespace}
-
-                        # Extract only the chart name (remove repo prefix like grafana/ or prom/)
-                        chart_name=\$(echo "${tool.chart}" | awk -F'/' '{print \$NF}')
-
-                        # Install or upgrade the tool
-                        helm upgrade --install ${tool.name} "\$chart_name" \
-                          --namespace ${namespace} \
-                          --repo ${chartRepo} \
-                          --set image.repository=${imageRepo} \
+                        helm upgrade --install ${tool.name} ${tool.chart} \
+                          --namespace ${tool.namespace} \
+                          --repo ${tool.repo} \
+                          --set image.repository=${tool.imageRepo} \
                           --set image.tag=latest \
-                          --wait
+                          --set image.pullPolicy=Always \
+                          --wait --timeout 10m
                     """
                 }
 
@@ -203,6 +228,7 @@ stage('Deploy Tools on EKS') {
         }
     }
 }
+
 
 
         stage('Send Kubeconfig via Email') {
