@@ -145,6 +145,8 @@ pipeline {
                 }
             }
         }
+
+
 stage('Deploy Tools on EKS') {
   when { expression { env.SERVICE_TYPE == 'eks' } }
   steps {
@@ -153,24 +155,20 @@ stage('Deploy Tools on EKS') {
         def payload = readJSON file: 'payload.json'
         def cluster_name = payload.eks.cluster_name
         def region = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
-        // prefer explicit ecr_repo_url from payload tool; fallback base
-        def ecrBase = "430118831270.dkr.ecr.${region}.amazonaws.com"
+        def ecrBase = "430118831270.dkr.ecr.${region}"
         def useFargate = payload.eks.use_fargate == true
 
         echo "☸ Deploying tools to EKS Cluster: ${cluster_name} (fargate=${useFargate})"
 
-        // fetch kubeconfig from terraform outputs and set KUBECONFIG
+        // kubeconfig from Terraform
         def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
         writeFile file: 'kubeconfig.yaml', text: kubeconfig
         env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
-        // docker login for ECR (for helm charts using local tar, not always needed but safe)
-        sh """
-          echo "🔐 Logging into ECR..."
-          aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${ecrBase}
-        """
+        // docker login for ECR (needed if helm pulls local chart tarballs or images locally)
+        sh "aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${ecrBase}.dkr.ecr.${region}.amazonaws.com"
 
-        // add repos once (idempotent)
+        // helm repos
         sh '''
           helm repo add grafana https://grafana.github.io/helm-charts || true
           helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
@@ -178,26 +176,18 @@ stage('Deploy Tools on EKS') {
           helm repo list || true
         '''
 
-        // collect namespaces required by tools (default -> 'default')
+        // tools list & namespaces
         def tools = payload.eks.tools_to_install ?: []
         def namespaces = (tools.collect { it.namespace ?: 'default' } + ['monitoring']).unique()
 
-        // create namespaces and create ecr-creds secret in each
+        // create namespaces and per-namespace ecr secret
         namespaces.each { ns ->
           sh "kubectl get ns ${ns} >/dev/null 2>&1 || kubectl create ns ${ns}"
-
-          // recreate secret to ensure valid token
           sh "kubectl delete secret ecr-creds -n ${ns} --ignore-not-found || true"
-
-          // Build the kubectl create secret command by concatenation to avoid Groovy string/dollar parsing issues
-          def createSecretCmd = "kubectl create secret docker-registry ecr-creds " +
-                                "--docker-server='${ecrBase}' " +
-                                "--docker-username=AWS " +
-                                "--docker-password=\"\$(aws ecr get-login-password --region ${region})\" " +
-                                "--namespace ${ns}"
-          sh createSecretCmd
-
-          // patch default serviceaccount so pods using default SA will be able to pull images
+          // build password substitution so Groovy doesn't choke on $()
+          def pwCmd = '$(aws ecr get-login-password --region ' + region + ')'
+          def createCmd = "kubectl create secret docker-registry ecr-creds --docker-server=${ecrBase}.dkr.ecr.${region}.amazonaws.com --docker-username=AWS --docker-password=\"" + pwCmd + "\" --namespace " + ns
+          sh createCmd
           sh "kubectl patch serviceaccount default -n ${ns} -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true"
         }
 
@@ -206,23 +196,23 @@ stage('Deploy Tools on EKS') {
         } else {
           tools.each { t ->
             def name = t.name ?: (t.tool ?: 'tool-'+UUID.randomUUID().toString()[0..7])
-            def chart = t.chart ?: (t.chart_name ?: name)         // e.g. "grafana/grafana" or "grafana"
+            def chart = t.chart ?: (t.chart_name ?: name)
             def repo = t.chart_repo ?: t.repo ?: ''
             def namespace = t.namespace ?: 'default'
             def useEcr = (t.use_ecr instanceof Boolean) ? t.use_ecr : (t.use_ecr ?: false)
-            def ecrUrl = t.ecr_repo_url ?: (useEcr ? "${ecrBase}/${name}" : '')
+            def ecrUrl = t.ecr_repo_url ?: (useEcr ? "${ecrBase}.dkr.ecr.${region}.amazonaws.com/${name}" : '')
             def tag = t.image_tag ?: 'latest'
             def helm_overrides = t.helm_overrides ?: [:]
 
             echo "📦 Preparing install for ${name} (chart=${chart}, repo=${repo}, ns=${namespace}, useEcr=${useEcr}, image=${ecrUrl}:${tag})"
 
-            // Validate fargate namespace coverage (prevent scheduling issues)
+            // fargate validation
             def fargateNamespaces = (payload.eks.fargate_selectors ?: []).collect{ it.namespace ?: "" }
             if (useFargate && !fargateNamespaces.contains(namespace)) {
               error("Fargate enabled but namespace '${namespace}' is not listed in payload.eks.fargate_selectors. Add {\"namespace\":\"${namespace}\",\"labels\":{}} to payload or disable fargate for this cluster.")
             }
 
-            // Build a values file that: sets image repository/tag, sets imagePullSecrets, disables persistence/node-exporter, and ensures the ServiceAccount references the secret
+            // build values file (many charts read these keys)
             def values = new StringBuilder()
             values << "# Auto-generated values for ${name}\n"
 
@@ -244,7 +234,6 @@ global:
               values << "# no ecrUrl provided — not overriding image repository\n"
             }
 
-            // persistence disable (cover common chart keys)
             values << """
 persistence:
   enabled: false
@@ -267,7 +256,6 @@ alertmanager:
     enabled: false
 """
 
-            // node-exporter / daemonset disable for Fargate
             if (useFargate || (helm_overrides.disable_node_exporter == true)) {
               values << """
 nodeExporter:
@@ -284,7 +272,7 @@ kubeNodeScraper:
 """
             }
 
-            // ensure serviceAccount uses imagePullSecrets (many charts support serviceAccount.imagePullSecrets)
+            // ensure serviceAccount uses imagePullSecrets
             values << """
 serviceAccount:
   create: true
@@ -292,10 +280,8 @@ serviceAccount:
     - name: ecr-creds
 """
 
-            // apply any user-provided helm_overrides (merged)
             if (helm_overrides && helm_overrides.size() > 0) {
               def overridesYaml = groovy.json.JsonOutput.toJson(helm_overrides)
-              // append as a yaml block (best-effort)
               values << "\n# user helm_overrides (json): ${overridesYaml}\n"
             }
 
@@ -303,66 +289,55 @@ serviceAccount:
             writeFile file: valuesFile, text: values.toString()
             echo "🔎 values file for ${name} written -> ${valuesFile}"
 
-            // Chart arg handling: if repo provided and chart contains '/', pass chart name; else pass chart as-is
+            // chart argument handling
             def chartArg = chart
-            if (repo && chart.contains('/')) {
-              chartArg = chart.tokenize('/').last()
-            }
+            if (repo && chart.contains('/')) { chartArg = chart.tokenize('/').last() }
 
-            // Build base helm command and add --set image.repository/tag to cover charts that require set-overrides
+            // Install without --wait to avoid permanent blocking; we'll check rollout with a bounded timeout
             def helmCmd = "helm upgrade --install ${name} ${chartArg}"
             if (repo && repo != '') { helmCmd += " --repo ${repo}" }
-            helmCmd += " --namespace ${namespace} -f ${valuesFile} --wait --timeout 30m --debug"
-            // also add set values to increase compatibility
+            helmCmd += " --namespace ${namespace} -f ${valuesFile} --debug"
             if (ecrUrl) {
               helmCmd += " --set image.repository=${ecrUrl} --set image.tag=${tag} --set global.image.repository=${ecrUrl} --set global.image.tag=${tag}"
             }
 
-            // attempt helm up to 3 times with post-failure debug collection
-            def ok = false
-            for (int attempt = 1; attempt <= 3; attempt++) {
-              try {
-                echo "➡️ Helm attempt ${attempt} for ${name}: ${helmCmd}"
-                sh helmCmd
-                echo "✅ Helm install succeeded for ${name}"
+            // run helm (no --wait)
+            echo "➡️ Running Helm: ${helmCmd}"
+            sh helmCmd
 
-                // After install, patch the release serviceaccount name to reference ecr-creds as fallback
-                // Many charts create a serviceaccount with the release name; try patching it
-                sh "kubectl patch serviceaccount ${name} -n ${namespace} -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true"
+            // Patch serviceaccount with ecr-creds (best-effort)
+            sh "kubectl patch serviceaccount ${name} -n ${namespace} -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true"
 
-                // Wait for Deployment(s) rollout (best-effort)
-                // list deployments in namespace matching release name prefix
-                sh """
-                  for d in \$(kubectl get deploy -n ${namespace} -o name | grep ${name} || true); do
-                    echo "waiting rollout status for \$d"
-                    kubectl rollout status \$d -n ${namespace} --timeout=300s || true
-                  done
-                """
-                ok = true
-                break
-              } catch (err) {
-                echo "⚠️ Helm attempt ${attempt} failed for ${name}: ${err}"
-                // collect debug info
-                sh "kubectl get all -n ${namespace} || true"
-                sh "echo '=== Describe pods ==='; kubectl describe pods -n ${namespace} | sed -n '1,200p' || true"
-                sh "echo '=== Recent events ==='; kubectl get events -n ${namespace} --sort-by=.lastTimestamp | tail -n 50 || true"
-                sh "echo '=== Pod logs (last 200 lines) ==='; for p in \$(kubectl get pods -n ${namespace} -o name | sed 's#pod/##'); do echo '---- logs for' \$p; kubectl logs \$p -n ${namespace} --tail=200 || true; done || true"
+            // Bounded rollout wait (per-deployment) and then diagnostic gather if not ready
+            def rolloutScript = '''
+for d in $(kubectl get deploy -n ''' + namespace + ''' -o name | grep ''' + name + ''' || true); do
+  echo "waiting rollout status for $d (120s timeout)"
+  kubectl rollout status $d -n ''' + namespace + ''' --timeout=120s || true
+done
+'''
+            sh rolloutScript
 
-                if (attempt < 3) {
-                  echo "  will retry in 10s..."
-                  sleep time: 10, unit: 'SECONDS'
-                } else {
-                  error("Helm install failed for ${name} after 3 attempts")
-                }
-              }
-            } // end attempts
-          } // end tools.each
-        } // end if tools
+            // if pods not ready, collect diagnostics
+            sh """
+              echo '--- pods ---'
+              kubectl get pods -n ${namespace} -o wide || true
+              echo '--- recent events ---'
+              kubectl get events -n ${namespace} --sort-by=.lastTimestamp | tail -n 50 || true
+              echo '--- describe pods (first 200 lines) ---'
+              kubectl describe pods -n ${namespace} | sed -n '1,200p' || true
+              echo '--- pod logs (last 200 lines) ---'
+              for p in $(kubectl get pods -n ${namespace} -o name | sed 's#pod/##'); do
+                echo '---- logs for' $p
+                kubectl logs $p -n ${namespace} --tail=200 || true
+              done
+            """
+          } // tools.each
+        } // if tools
         echo "✅ Deploy stage finished for ${cluster_name}"
-      } // end script
-    } // end withCredentials
-  } // end steps
-} // end stage
+      } // script
+    } // withCredentials
+  } // steps
+} // stage
 
 
 
