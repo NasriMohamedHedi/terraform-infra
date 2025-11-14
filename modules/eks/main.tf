@@ -135,17 +135,30 @@ resource "aws_iam_role_policy_attachment" "fargate_ecr_read" {
   }
 }
 
-# Fargate Profiles
+# -------------------------------------------------------------------
+# Fargate profile map (use for_each to create stable, readable names)
+# -------------------------------------------------------------------
+locals {
+  # build a map keyed by "<sanitized-namespace>-<index>" to guarantee uniqueness
+  fargate_selector_map = var.use_fargate && length(var.fargate_selectors) > 0 ? {
+    for idx, s in var.fargate_selectors :
+    "${replace(tostring(s.namespace), "/", "-")}-${idx}" => {
+      namespace = tostring(s.namespace)
+      labels    = lookup(s, "labels", {})
+    }
+  } : {}
+}
+
 resource "aws_eks_fargate_profile" "fargate_profile" {
-  count                 = var.use_fargate && length(var.fargate_selectors) > 0 ? length(var.fargate_selectors) : 0
-  cluster_name          = aws_eks_cluster.cluster[0].name
-  fargate_profile_name  = "${var.cluster_name}-fargate-${count.index}"
+  for_each               = local.fargate_selector_map
+  cluster_name           = aws_eks_cluster.cluster[0].name
+  fargate_profile_name   = "${var.cluster_name}-fargate-${each.key}"
   pod_execution_role_arn = aws_iam_role.fargate_pod_execution_role[0].arn
-  subnet_ids            = var.subnet_ids
+  subnet_ids             = var.subnet_ids
 
   selector {
-    namespace = var.fargate_selectors[count.index].namespace
-    labels    = lookup(var.fargate_selectors[count.index], "labels", {})
+    namespace = each.value.namespace
+    labels    = lookup(each.value, "labels", {})
   }
 
   depends_on = [aws_eks_cluster.cluster]
@@ -187,8 +200,9 @@ output "cluster_id" {
   value = try(aws_eks_cluster.cluster[0].id, null)
 }
 
+# For for_each-based fargate_profile, collect names safely (works with 0..n profiles)
 output "fargate_profile_names" {
-  value = try(aws_eks_fargate_profile.fargate_profile[*].fargate_profile_name, [])
+  value = try([for p in values(aws_eks_fargate_profile.fargate_profile) : p.fargate_profile_name], [])
 }
 
 # safe conditional output for ECR repo URLs
