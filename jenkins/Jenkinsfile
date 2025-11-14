@@ -145,7 +145,6 @@ pipeline {
                 }
             }
         }
-
 stage('Deploy Tools on EKS') {
   when { expression { env.SERVICE_TYPE == 'eks' } }
   steps {
@@ -186,15 +185,18 @@ stage('Deploy Tools on EKS') {
         // create namespaces and create ecr-creds secret in each
         namespaces.each { ns ->
           sh "kubectl get ns ${ns} >/dev/null 2>&1 || kubectl create ns ${ns}"
+
           // recreate secret to ensure valid token
           sh "kubectl delete secret ecr-creds -n ${ns} --ignore-not-found || true"
-          sh """
-            kubectl create secret docker-registry ecr-creds \
-              --docker-server='${ecrBase}' \
-              --docker-username=AWS \
-              --docker-password="$(aws ecr get-login-password --region ${region})" \
-              --namespace ${ns}
-          """
+
+          // Build the kubectl create secret command by concatenation to avoid Groovy string/dollar parsing issues
+          def createSecretCmd = "kubectl create secret docker-registry ecr-creds " +
+                                "--docker-server='${ecrBase}' " +
+                                "--docker-username=AWS " +
+                                "--docker-password=\"\$(aws ecr get-login-password --region ${region})\" " +
+                                "--namespace ${ns}"
+          sh createSecretCmd
+
           // patch default serviceaccount so pods using default SA will be able to pull images
           sh "kubectl patch serviceaccount default -n ${ns} -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true"
         }
