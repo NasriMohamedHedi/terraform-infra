@@ -155,21 +155,22 @@ stage('Deploy Tools on EKS') {
         def cluster_name = payload.eks.cluster_name
         def region = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
         def ecrBase = "430118831270.dkr.ecr.${region}.amazonaws.com"
+        def useFargate = payload.eks.use_fargate == true
 
-        echo "☸ Deploying tools to EKS Cluster: ${cluster_name}"
+        echo "☸ Deploying tools to EKS Cluster: ${cluster_name} (fargate=${useFargate})"
 
-        // kubeconfig
+        // kubeconfig from Terraform
         def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
         writeFile file: 'kubeconfig.yaml', text: kubeconfig
         env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
-        // login to ECR locally (so helm plugin/docker can pull when doing image tests or local pulls)
+        // Login to ECR
         sh '''
           echo "🔐 Logging into ECR..."
           aws ecr get-login-password --region ''' + region + ''' | docker login --username AWS --password-stdin 430118831270.dkr.ecr.''' + region + '''.amazonaws.com
         '''
 
-        // add repos (safe -- repeated adds are ignored)
+        // Helm repos (safe to call multiple times)
         sh '''
           helm repo add grafana https://grafana.github.io/helm-charts || true
           helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
@@ -177,9 +178,8 @@ stage('Deploy Tools on EKS') {
           helm repo list || true
         '''
 
-        // ensure namespace and ecr secret
+        // Ensure the target namespace(s) and create ecr pull secret
         sh "kubectl get ns monitoring >/dev/null 2>&1 || kubectl create ns monitoring"
-        // recreate secret so credentials are fresh
         sh "kubectl delete secret ecr-creds -n monitoring --ignore-not-found || true"
         sh '''
           kubectl create secret docker-registry ecr-creds \
@@ -190,38 +190,49 @@ stage('Deploy Tools on EKS') {
         '''
         sh "kubectl patch serviceaccount default -n monitoring -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true"
 
-        // tools list: prefer payload.eks.tools_to_install (objects). provide defaults if absent.
-        def tools = payload.eks.tools_to_install ?: []
+        // Collect fargate namespaces (if any) so we can validate
+        def fargateNamespaces = (payload.eks.fargate_selectors ?: []).collect{ it.namespace ?: "" }
 
+        def tools = payload.eks.tools_to_install ?: []
         if (!tools || tools.size() == 0) {
           echo "ℹ️ No tools listed in payload.eks.tools_to_install — nothing to deploy."
         } else {
           tools.each { t ->
-            // normalize fields from payload (support both "chart" and "chart_repo" keys etc.)
             def name = t.name ?: (t.tool ?: 'tool-'+UUID.randomUUID().toString()[0..7])
-            def chart = t.chart ?: (t.chart_name ?: name)
+            def chart = t.chart ?: (t.chart_name ?: name)         // e.g. "grafana/grafana" or "grafana"
             def repo = t.chart_repo ?: t.repo ?: ''
             def namespace = t.namespace ?: 'default'
             def useEcr = (t.use_ecr instanceof Boolean) ? t.use_ecr : (t.use_ecr ?: false)
             def ecrUrl = t.ecr_repo_url ?: (useEcr ? "${ecrBase}/${name}" : '')
+            def helm_overrides = t.helm_overrides ?: [:]
 
-            echo "📦 Preparing install for ${name} (chart=${chart}, repo=${repo}, ns=${namespace}, useECR=${useEcr})"
+            echo "📦 Preparing install for ${name} (chart=${chart}, repo=${repo}, ns=${namespace}, useEcr=${useEcr})"
 
-            // create namespace
+            // If Fargate is enabled, ensure the namespace is covered by a fargate selector
+            if (useFargate && !fargateNamespaces.contains(namespace)) {
+              error("Fargate enabled but namespace '${namespace}' is not listed in payload.eks.fargate_selectors. Add {\"namespace\":\"${namespace}\",\"labels\":{}} to payload or disable fargate for this cluster.")
+            }
+
+            // create namespace if missing
             sh "kubectl get ns ${namespace} >/dev/null 2>&1 || kubectl create ns ${namespace}"
 
-            // write a small values YAML to override common image keys (most charts use one of these)
-            def valuesYaml = """\
-# Auto-generated overrides to force images to private ECR (if provided)
-"""
+            // Build values.yaml — we include multiple keys to cover common chart differences
+            def values = new StringBuilder()
+            values << "# Auto-generated values for ${name}\n"
+
             if (ecrUrl) {
-              valuesYaml += """image:
+              values << """
+image:
   repository: "${ecrUrl}"
   tag: "latest"
 
-# common alternative keys used by charts
 imagePullSecrets:
   - name: ecr-creds
+
+global:
+  image:
+    repository: "${ecrUrl}"
+    tag: "latest"
 
 server:
   image:
@@ -238,58 +249,100 @@ prometheus:
     image:
       repository: "${ecrUrl}"
       tag: "latest"
-
-# fallback values (some charts use these)
-global:
-  image:
-    repository: "${ecrUrl}"
-    tag: "latest"
 """
             } else {
-              valuesYaml += "# No ecrRepoUrl provided for ${name}; not overriding images.\n"
+              values << "# no ecrUrl provided — not overriding image repository\n"
+            }
+
+            // If prometheus-like chart OR override asks to disable the node exporter / daemonsets on Fargate:
+            if (useFargate || (helm_overrides.disable_node_exporter == true)) {
+              values << """
+# Multiple possible keys to disable node-exporter / daemonsets (covers chart variants)
+nodeExporter:
+  enabled: false
+
+prometheus-node-exporter:
+  enabled: false
+
+prometheusNodeExporter:
+  enabled: false
+
+kubeNodeScraper:
+  enabled: false
+"""
+            }
+
+            // If Fargate or user requested persistence disabled, disable PVCs (avoids (storage) scheduling edge cases on Fargate)
+            if (useFargate || (helm_overrides.persistence_disabled == true) || (helm_overrides.persistentVolume_disabled == true) ) {
+              values << """
+# Disable persistence variants — different charts use different keys
+persistence:
+  enabled: false
+
+server:
+  persistentVolume:
+    enabled: false
+
+prometheus:
+  server:
+    persistentVolume:
+      enabled: false
+
+grafana:
+  persistence:
+    enabled: false
+
+alertmanager:
+  persistentVolume:
+    enabled: false
+"""
             }
 
             def valuesFile = "values-${name}.yaml"
-            writeFile file: valuesFile, text: valuesYaml
+            writeFile file: valuesFile, text: values.toString()
             echo "🔎 values file for ${name} written -> ${valuesFile}"
 
-            // formulate helm install command. prefer using -f values file to avoid complex shell interpolation.
-            def helmCmd = "helm upgrade --install ${name} ${chart}"
-            if (repo && repo != '') {
-              helmCmd += " --repo ${repo}"
+            // Choose chart arg correctly:
+            // - If repo is provided AND chart contains '/', pass chart name only and add --repo <repo>
+            // - Else pass chart as-is (e.g. "grafana/grafana" if repo previously added to helm repo list)
+            def chartArg = chart
+            if (repo && chart.contains('/')) {
+              chartArg = chart.tokenize('/').last() // e.g. "grafana" from "grafana/grafana"
             }
+
+            def helmCmd = "helm upgrade --install ${name} ${chartArg}"
+            if (repo && repo != '') { helmCmd += " --repo ${repo}" }
             helmCmd += " --namespace ${namespace} -f ${valuesFile} --wait --timeout 15m --debug"
 
-            // Attempt helm install up to 3 times (Groovy-level loop avoids shell parsing pitfalls)
-            def success = false
+            // Attempt helm up to 3 times
+            def ok = false
             for (int attempt = 1; attempt <= 3; attempt++) {
               try {
                 echo "➡️ Helm attempt ${attempt} for ${name}: ${helmCmd}"
                 sh helmCmd
-                echo "✅ Helm install succeeded for ${name} on attempt ${attempt}"
-                success = true
+                echo "✅ Helm install succeeded for ${name}"
+                ok = true
                 break
               } catch (err) {
-                echo "⚠️ Helm install attempt ${attempt} failed for ${name}: ${err}"
+                echo "⚠️ Helm attempt ${attempt} failed for ${name}: ${err}"
                 if (attempt < 3) {
                   echo "  will retry in 10s..."
                   sleep time: 10, unit: 'SECONDS'
                 } else {
-                  // gather debug info
                   echo "❌ Final failure for ${name} — collecting debug info"
                   sh "kubectl get all -n ${namespace} || true"
                   sh "kubectl get events -n ${namespace} --sort-by=.lastTimestamp | tail -n 50 || true"
                   error("Helm install failed for ${name} after 3 attempts")
                 }
               }
-            } // end attempts
+            }
           } // end tools.each
-        } // end else tools
+        } // end if tools
         echo "✅ Deploy stage finished for ${cluster_name}"
       } // end script
     } // end withCredentials
-  }
-}
+  } // end steps
+} // end stage
 
 
 
