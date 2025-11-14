@@ -155,7 +155,7 @@ stage('Deploy Tools on EKS') {
         def payload = readJSON file: 'payload.json'
         def cluster_name = payload.eks.cluster_name
         def region = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
-        def ecrBase = "430118831270.dkr.ecr.${region}"
+        def ecrRegistry = "430118831270.dkr.ecr.${region}.amazonaws.com"
         def useFargate = payload.eks.use_fargate == true
 
         echo "☸ Deploying tools to EKS Cluster: ${cluster_name} (fargate=${useFargate})"
@@ -165,12 +165,10 @@ stage('Deploy Tools on EKS') {
         writeFile file: 'kubeconfig.yaml', text: kubeconfig
         env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
-        // ECR login
-        sh """
-          aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${ecrBase}.dkr.ecr.${region}.amazonaws.com
-        """
+        // ECR login (constructed via concatenation to avoid GString $-issues)
+        sh 'aws ecr get-login-password --region ' + region + ' | docker login --username AWS --password-stdin ' + ecrRegistry
 
-        // Add helm repos
+        // Add helm repos (idempotent)
         sh '''
           helm repo add grafana https://grafana.github.io/helm-charts || true
           helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
@@ -181,19 +179,17 @@ stage('Deploy Tools on EKS') {
         def tools = payload.eks.tools_to_install ?: []
         def namespaces = (tools.collect { it.namespace ?: 'default' } + ['monitoring']).unique()
 
-        // Namespace + ECR registry secret
+        // Create namespaces and ensure ecr-creds secret exists in each namespace
         namespaces.each { ns ->
           sh "kubectl get ns ${ns} >/dev/null 2>&1 || kubectl create ns ${ns}"
-
           sh "kubectl delete secret ecr-creds -n ${ns} --ignore-not-found || true"
 
-          sh """
-            kubectl create secret docker-registry ecr-creds \
-              --docker-server=${ecrBase}.dkr.ecr.${region}.amazonaws.com \
-              --docker-username=AWS \
-              --docker-password="\\$(aws ecr get-login-password --region ${region})" \
-              --namespace ${ns}
-          """
+          // use single-quoted block + concatenation so shell $(...) is not interpreted by Groovy
+          sh '''kubectl create secret docker-registry ecr-creds \
+            --docker-server=''' + ecrRegistry + ''' \
+            --docker-username=AWS \
+            --docker-password="$(aws ecr get-login-password --region ''' + region + ''')" \
+            --namespace ''' + ns
 
           sh "kubectl patch serviceaccount default -n ${ns} -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true"
         }
@@ -203,19 +199,27 @@ stage('Deploy Tools on EKS') {
           return
         }
 
+        // Iterate tools from payload and helm install/upgrade them
         tools.each { t ->
-          def name = t.name
+          def name = t.name ?: (t.tool ?: 'tool-'+UUID.randomUUID().toString()[0..7])
           def namespace = t.namespace ?: "default"
-          def repo = t.chart_repo
-          def chart = t.chart
-          def useEcr = t.use_ecr ?: false
-          def ecrUrl = t.ecr_repo_url ?: ""
+          def repo = t.chart_repo ?: ''
+          def chart = t.chart ?: (t.chart_name ?: name)
+          def useEcr = (t.use_ecr instanceof Boolean) ? t.use_ecr : (t.use_ecr ?: false)
+          def ecrUrl = t.ecr_repo_url ?: (useEcr ? (ecrRegistry + '/' + name) : '')
           def tag = t.image_tag ?: "latest"
+          def helm_overrides = t.helm_overrides ?: [:]
 
-          echo "📦 Installing ${name}"
+          echo "📦 Preparing install for ${name} (chart=${chart}, repo=${repo}, ns=${namespace}, useEcr=${useEcr}, image=${ecrUrl}:${tag})"
 
-          // values.yaml
-          def values = """
+          // Validate Fargate namespace coverage to avoid scheduling surprises
+          def fargateNamespaces = (payload.eks.fargate_selectors ?: []).collect{ it.namespace ?: "" }
+          if (useFargate && !fargateNamespaces.contains(namespace)) {
+            error("Fargate enabled but namespace '${namespace}' is not listed in payload.eks.fargate_selectors. Add {\"namespace\":\"${namespace}\",\"labels\":{}} to payload or disable fargate for this cluster.")
+          }
+
+          // Build values.yaml content (simple, covers common keys)
+          def values = """# Auto-generated values for ${name}
 image:
   repository: "${ecrUrl}"
   tag: "${tag}"
@@ -231,50 +235,71 @@ serviceAccount:
   imagePullSecrets:
     - name: ecr-creds
 """
+
           def valuesFile = "values-${name}.yaml"
           writeFile file: valuesFile, text: values
+          echo "🔎 values file for ${name} written -> ${valuesFile}"
 
-          // Helm install w/out --wait
-          def chartArg = chart.contains("/") ? chart.split("/").last() : chart
-          def helmCmd = "helm upgrade --install ${name} ${chartArg} --repo ${repo} --namespace ${namespace} -f ${valuesFile} --debug"
+          // Chart arg: if chart uses repo/name form, helm can install by name when repo provided
+          def chartArg = chart
+          if (repo && chart.contains('/')) { chartArg = chart.tokenize('/').last() }
 
-          sh helmCmd
+          // Build helm command (no inline shell interpolation that would break Groovy)
+          def helmCmd = "helm upgrade --install ${name} ${chartArg}"
+          if (repo && repo != '') { helmCmd += " --repo ${repo}" }
+          helmCmd += " --namespace ${namespace} -f ${valuesFile} --debug --timeout 30m"
 
-          // Patch serviceAccount
-          sh "kubectl patch serviceaccount ${name} -n ${namespace} -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true"
+          // add --set fallbacks to increase compatibility with different charts
+          if (ecrUrl) {
+            helmCmd += " --set image.repository=${ecrUrl} --set image.tag=${tag} --set global.image.repository=${ecrUrl} --set global.image.tag=${tag}"
+          }
 
-          // Rollout status
-          sh """
-            for d in \\$(kubectl get deploy -n ${namespace} -o name | grep ${name} || true); do
-              echo "waiting rollout for \\$d"
-              kubectl rollout status \\$d -n ${namespace} --timeout=120s || true
-            done
-          """
+          // Try up to 3 times; on failure collect useful debug info
+          def ok = false
+          for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+              echo "➡️ Helm attempt ${attempt} for ${name}: ${helmCmd}"
+              sh helmCmd
+              echo "✅ Helm install succeeded for ${name}"
 
-          // Diagnostics
-          sh """
-            echo '--- pods ---'
-            kubectl get pods -n ${namespace} -o wide || true
+              // Patch the release serviceaccount (many charts create SA named after release)
+              sh "kubectl patch serviceaccount ${name} -n ${namespace} -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true"
 
-            echo '--- events ---'
-            kubectl get events -n ${namespace} --sort-by=.lastTimestamp | tail -n 40 || true
+              // Wait for any deployments that match the release name
+              sh '''for d in $(kubectl get deploy -n ''' + namespace + ''' -o name | grep ''' + name + ''' || true); do
+  echo "waiting rollout for $d"
+  kubectl rollout status $d -n ''' + namespace + ''' --timeout=120s || true
+done'''
+              ok = true
+              break
+            } catch (err) {
+              echo "⚠️ Helm attempt ${attempt} failed for ${name}: ${err}"
+              // collect debug info (single-quoted blocks + concatenation to avoid Groovy errors)
+              sh "kubectl get all -n ${namespace} || true"
+              sh '''echo '=== Describe pods ==='
+kubectl describe pods -n ''' + namespace + ''' | sed -n '1,200p' || true
+echo '=== Recent events ==='
+kubectl get events -n ''' + namespace + ''' --sort-by=.lastTimestamp | tail -n 50 || true
+echo '=== Pod logs (last 200 lines) ==='
+for p in $(kubectl get pods -n ''' + namespace + ''' -o name | sed 's#pod/##'); do
+  echo "---- logs for $p"
+  kubectl logs $p -n ''' + namespace + ''' --tail=200 || true
+done || true'''
+              if (attempt < 3) {
+                echo "  will retry in 10s..."
+                sleep time: 10, unit: 'SECONDS'
+              } else {
+                error("Helm install failed for ${name} after 3 attempts")
+              }
+            }
+          } // end attempts
+        } // end tools.each
 
-            echo '--- describe pods ---'
-            kubectl describe pods -n ${namespace} | sed -n '1,200p' || true
-
-            echo '--- logs ---'
-            for p in \\$(kubectl get pods -n ${namespace} -o name | sed 's#pod/##'); do
-              echo "---- logs for \\$p"
-              kubectl logs \\$p -n ${namespace} --tail=100 || true
-            done
-          """
-
-        } // end each
-      }
-    }
-  }
-}
-
+        echo "✅ Deploy stage finished for ${cluster_name}"
+      } // end script
+    } // end withCredentials
+  } // end steps
+} // end stage
 
 
 
