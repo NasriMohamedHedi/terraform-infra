@@ -146,7 +146,6 @@ pipeline {
             }
         }
 
-
 stage('Deploy Tools on EKS') {
   when { expression { env.SERVICE_TYPE == 'eks' } }
   steps {
@@ -156,16 +155,15 @@ stage('Deploy Tools on EKS') {
         def cluster_name = payload.eks.cluster_name
         def region = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
         def ecrRegistry = "430118831270.dkr.ecr.${region}.amazonaws.com"
-        def useFargate = payload.eks.use_fargate == true
 
-        echo "☸ Deploying tools to EKS Cluster: ${cluster_name} (fargate=${useFargate})"
+        echo "☸ Deploying tools to EKS Cluster: ${cluster_name}"
 
         // Load kubeconfig
         def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
         writeFile file: 'kubeconfig.yaml', text: kubeconfig
         env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
-        // ECR login (constructed via concatenation to avoid GString $-issues)
+        // ECR login (safe concatenation)
         sh 'aws ecr get-login-password --region ' + region + ' | docker login --username AWS --password-stdin ' + ecrRegistry
 
         // Add helm repos (idempotent)
@@ -173,7 +171,6 @@ stage('Deploy Tools on EKS') {
           helm repo add grafana https://grafana.github.io/helm-charts || true
           helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
           helm repo update || true
-          helm repo list || true
         '''
 
         def tools = payload.eks.tools_to_install ?: []
@@ -183,14 +180,11 @@ stage('Deploy Tools on EKS') {
         namespaces.each { ns ->
           sh "kubectl get ns ${ns} >/dev/null 2>&1 || kubectl create ns ${ns}"
           sh "kubectl delete secret ecr-creds -n ${ns} --ignore-not-found || true"
-
-          // use single-quoted block + concatenation so shell $(...) is not interpreted by Groovy
           sh '''kubectl create secret docker-registry ecr-creds \
             --docker-server=''' + ecrRegistry + ''' \
             --docker-username=AWS \
             --docker-password="$(aws ecr get-login-password --region ''' + region + ''')" \
             --namespace ''' + ns
-
           sh "kubectl patch serviceaccount default -n ${ns} -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true"
         }
 
@@ -212,12 +206,6 @@ stage('Deploy Tools on EKS') {
 
           echo "📦 Preparing install for ${name} (chart=${chart}, repo=${repo}, ns=${namespace}, useEcr=${useEcr}, image=${ecrUrl}:${tag})"
 
-          // Validate Fargate namespace coverage to avoid scheduling surprises
-          def fargateNamespaces = (payload.eks.fargate_selectors ?: []).collect{ it.namespace ?: "" }
-          if (useFargate && !fargateNamespaces.contains(namespace)) {
-            error("Fargate enabled but namespace '${namespace}' is not listed in payload.eks.fargate_selectors. Add {\"namespace\":\"${namespace}\",\"labels\":{}} to payload or disable fargate for this cluster.")
-          }
-
           // Build values.yaml content (simple, covers common keys)
           def values = """# Auto-generated values for ${name}
 image:
@@ -235,7 +223,6 @@ serviceAccount:
   imagePullSecrets:
     - name: ecr-creds
 """
-
           def valuesFile = "values-${name}.yaml"
           writeFile file: valuesFile, text: values
           echo "🔎 values file for ${name} written -> ${valuesFile}"
@@ -249,7 +236,6 @@ serviceAccount:
           if (repo && repo != '') { helmCmd += " --repo ${repo}" }
           helmCmd += " --namespace ${namespace} -f ${valuesFile} --debug --timeout 30m"
 
-          // add --set fallbacks to increase compatibility with different charts
           if (ecrUrl) {
             helmCmd += " --set image.repository=${ecrUrl} --set image.tag=${tag} --set global.image.repository=${ecrUrl} --set global.image.tag=${tag}"
           }
@@ -270,11 +256,11 @@ serviceAccount:
   echo "waiting rollout for $d"
   kubectl rollout status $d -n ''' + namespace + ''' --timeout=120s || true
 done'''
+
               ok = true
               break
             } catch (err) {
               echo "⚠️ Helm attempt ${attempt} failed for ${name}: ${err}"
-              // collect debug info (single-quoted blocks + concatenation to avoid Groovy errors)
               sh "kubectl get all -n ${namespace} || true"
               sh '''echo '=== Describe pods ==='
 kubectl describe pods -n ''' + namespace + ''' | sed -n '1,200p' || true

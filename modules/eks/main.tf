@@ -1,29 +1,27 @@
-# NOTE: removed 'terraform { required_providers { ... } }' block from module.
-# Modules must not set provider requirements. Root module controls provider versions.
-
-# data "aws_eks_cluster_auth" "cluster" remains (it will be used when cluster exists)
 data "aws_eks_cluster_auth" "cluster" {
   name = try(aws_eks_cluster.cluster[0].name, "")
 }
 
-# Generate unique suffix
 resource "random_id" "unique_suffix" {
   byte_length = 4
-  keepers = { cluster_name = var.cluster_name }
+  keepers = {
+    cluster_name = var.cluster_name
+  }
 }
 
-# IAM Role for EKS Cluster
 resource "aws_iam_role" "eks_cluster_role" {
   count = var.cluster_name != "" ? 1 : 0
   name  = "${var.cluster_name}-eks-cluster-role-${random_id.unique_suffix.hex}"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [ {
+    Statement = [{
       Action    = "sts:AssumeRole"
       Effect    = "Allow"
-      Principal = { Service = "eks.amazonaws.com" }
-    } ]
+      Principal = {
+        Service = "eks.amazonaws.com"
+      }
+    }]
   })
 
   lifecycle {
@@ -51,11 +49,10 @@ resource "aws_iam_role_policy_attachment" "eks_service_policy" {
   }
 }
 
-# Security Group
 resource "aws_security_group" "eks_cluster" {
   count       = var.cluster_name != "" ? 1 : 0
   name_prefix = "${var.cluster_name}-sg-"
-  description = "Security group for EKS cluster"
+  description = "EKS cluster security group"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -77,7 +74,6 @@ resource "aws_security_group" "eks_cluster" {
   }
 }
 
-# EKS Cluster
 resource "aws_eks_cluster" "cluster" {
   count    = var.cluster_name != "" && length(var.subnet_ids) > 0 ? 1 : 0
   name     = var.cluster_name
@@ -95,18 +91,21 @@ resource "aws_eks_cluster" "cluster" {
   ]
 }
 
-# Fargate Pod Execution Role
-resource "aws_iam_role" "fargate_pod_execution_role" {
-  count = var.cluster_name != "" && var.use_fargate ? 1 : 0
-  name  = "${var.cluster_name}-fargate-pod-execution-role-${random_id.unique_suffix.hex}"
+# IAM for Node Group (EC2)
+resource "aws_iam_role" "node_group_role" {
+  count = var.create_node_group && var.cluster_name != "" ? 1 : 0
+
+  name = "${var.cluster_name}-nodegroup-role-${random_id.unique_suffix.hex}"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [ {
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "eks-fargate-pods.amazonaws.com" }
-    } ]
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
   })
 
   lifecycle {
@@ -114,58 +113,51 @@ resource "aws_iam_role" "fargate_pod_execution_role" {
   }
 }
 
-resource "aws_iam_role_policy_attachment" "fargate_pod_execution_policy" {
-  count      = var.cluster_name != "" && var.use_fargate ? 1 : 0
-  role       = aws_iam_role.fargate_pod_execution_role[0].name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy"
-
-  lifecycle {
-    ignore_changes = [id]
-  }
+resource "aws_iam_role_policy_attachment" "worker_node" {
+  count      = length(aws_iam_role.node_group_role) > 0 ? 1 : 0
+  role       = aws_iam_role.node_group_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
 }
 
-# Add ECR read permissions for pods running on Fargate so pods can pull images from private ECR.
-resource "aws_iam_role_policy_attachment" "fargate_ecr_read" {
-  count      = var.cluster_name != "" && var.use_fargate ? 1 : 0
-  role       = aws_iam_role.fargate_pod_execution_role[0].name
+resource "aws_iam_role_policy_attachment" "cni" {
+  count      = length(aws_iam_role.node_group_role) > 0 ? 1 : 0
+  role       = aws_iam_role.node_group_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
+resource "aws_iam_role_policy_attachment" "ecr_read" {
+  count      = length(aws_iam_role.node_group_role) > 0 ? 1 : 0
+  role       = aws_iam_role.node_group_role[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-
-  lifecycle {
-    ignore_changes = [id]
-  }
 }
 
-# -------------------------------------------------------------------
-# Fargate profile map (use for_each to create stable, readable names)
-# -------------------------------------------------------------------
-locals {
-  # build a map keyed by "<sanitized-namespace>-<index>" to guarantee uniqueness
-  fargate_selector_map = var.use_fargate && length(var.fargate_selectors) > 0 ? {
-    for idx, s in var.fargate_selectors :
-    "${replace(tostring(s.namespace), "/", "-")}-${idx}" => {
-      namespace = tostring(s.namespace)
-      labels    = lookup(s, "labels", {})
-    }
-  } : {}
-}
+resource "aws_eks_node_group" "node_group" {
+  count = var.create_node_group && var.cluster_name != "" ? 1 : 0
 
-resource "aws_eks_fargate_profile" "fargate_profile" {
-  for_each               = local.fargate_selector_map
-  cluster_name           = aws_eks_cluster.cluster[0].name
-  fargate_profile_name   = "${var.cluster_name}-fargate-${each.key}"
-  pod_execution_role_arn = aws_iam_role.fargate_pod_execution_role[0].arn
-  subnet_ids             = var.subnet_ids
+  cluster_name    = aws_eks_cluster.cluster[0].name
+  node_group_name = "${var.cluster_name}-ng"
+  node_role_arn   = aws_iam_role.node_group_role[0].arn
+  subnet_ids      = var.subnet_ids
 
-  selector {
-    namespace = each.value.namespace
-    labels    = lookup(each.value, "labels", {})
+  scaling_config {
+    desired_size = var.node_group_desired_size
+    min_size     = var.node_group_min_size
+    max_size     = var.node_group_max_size
   }
 
-  depends_on = [aws_eks_cluster.cluster]
+  instance_types = var.node_group_instance_types
+  disk_size      = var.node_group_disk_size
+
+  tags = merge({
+    "Name" = "${var.cluster_name}-ng"
+  }, var.node_group_tags)
+
+  depends_on = [
+    aws_eks_cluster.cluster
+  ]
 }
 
-# Create ECR repos for each tool (private repos)
-# If create_ecr_repos is false, this for_each becomes an empty set and nothing is created.
+# ECR repos logic (unchanged)
 resource "aws_ecr_repository" "tool_repo" {
   for_each = toset(var.create_ecr_repos ? var.tools_to_install : [])
 
@@ -176,10 +168,8 @@ resource "aws_ecr_repository" "tool_repo" {
     scan_on_push = false
   }
 
-  tags = {}
-
   lifecycle {
-    ignore_changes = [ tags, tags_all ]
+    ignore_changes = [tags, tags_all]
   }
 }
 
@@ -200,48 +190,7 @@ output "cluster_id" {
   value = try(aws_eks_cluster.cluster[0].id, null)
 }
 
-# For for_each-based fargate_profile, collect names safely (works with 0..n profiles)
-output "fargate_profile_names" {
-  value = try([for p in values(aws_eks_fargate_profile.fargate_profile) : p.fargate_profile_name], [])
-}
-
-# safe conditional output for ECR repo URLs
-locals {
-  ecr_repo_urls = var.create_ecr_repos ? { for k, r in aws_ecr_repository.tool_repo : k => r.repository_url } : {}
-}
-
-output "ecr_repo_urls" {
-  value = local.ecr_repo_urls
-}
-
-output "kubeconfig" {
-  value = <<-EOT
-apiVersion: v1
-clusters:
-- cluster:
-    server: ${aws_eks_cluster.cluster[0].endpoint}
-    certificate-authority-data: ${aws_eks_cluster.cluster[0].certificate_authority[0].data}
-  name: kubernetes
-contexts:
-- context:
-    cluster: kubernetes
-    user: aws
-  name: aws
-current-context: aws
-kind: Config
-preferences: {}
-users:
-- name: aws
-  user:
-    exec:
-      apiVersion: client.authentication.k8s.io/v1beta1
-      command: aws
-      args:
-        - "eks"
-        - "get-token"
-        - "--cluster-name"
-        - "${aws_eks_cluster.cluster[0].name}"
-EOT
-  sensitive = true
+output "node_group_names" {
+  value = try([for ng in aws_eks_node_group.node_group : ng.node_group_name], [])
 }
 

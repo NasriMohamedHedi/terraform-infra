@@ -78,16 +78,7 @@ locals {
   eks_subnet_ids_raw = lookup(local.payload_eks, "subnet_ids", [])
   eks_subnet_ids = [for id in local.eks_subnet_ids_raw : tostring(id)]
 
-  # normalize fargate selectors to object list { namespace, labels = map(string) }
-  eks_fargate_raw = lookup(local.payload_eks, "fargate_selectors", [])
-  eks_fargate_selectors = [
-    for s in local.eks_fargate_raw : {
-      namespace = tostring(lookup(s, "namespace", "default"))
-      labels    = { for k, v in try(lookup(s, "labels", {}), {}) : k => tostring(v) }
-    }
-  ]
-
-  # normalize tools_to_install -> list(string)
+  # normalize tools_to_install -> list(string) (module expects list of names)
   eks_tools_raw = lookup(local.payload_eks, "tools_to_install", [])
   eks_tools = [
     for t in local.eks_tools_raw :
@@ -100,8 +91,6 @@ locals {
     cluster_name       = tostring(lookup(local.payload_eks, "cluster_name", ""))
     vpc_id             = tostring(lookup(local.payload_eks, "vpc_id", ""))
     subnet_ids         = local.eks_subnet_ids
-    use_fargate        = lookup(local.payload_eks, "use_fargate", false)
-    fargate_selectors  = local.eks_fargate_selectors
     Owner              = tostring(lookup(local.payload_eks, "Owner", ""))
     tools_to_install   = local.eks_tools
     kubernetes_version = tostring(lookup(local.payload_eks, "kubernetes_version", "1.29"))
@@ -114,6 +103,7 @@ locals {
     local.eks_config.Owner != ""
   ) : true
 }
+
 
 # ----------------
 # EC2 Key Pair (unchanged)
@@ -158,18 +148,21 @@ module "eks" {
   # when payload contains eks, create a single keyed module with key "eks" so old state addresses match
   for_each = local.is_eks && local.validate_eks ? { "eks" = local.eks_config } : {}
 
-  cluster_name       = each.value.cluster_name
-  kubernetes_version = each.value.kubernetes_version
-  vpc_id             = each.value.vpc_id
-  subnet_ids         = each.value.subnet_ids
-  use_fargate        = each.value.use_fargate
-  fargate_selectors  = each.value.fargate_selectors
-  owner_name         = each.value.Owner
-  tools_to_install   = each.value.tools_to_install
-  aws_region         = var.aws_region
+  cluster_name               = each.value.cluster_name
+  kubernetes_version         = each.value.kubernetes_version
+  vpc_id                     = each.value.vpc_id
+  subnet_ids                 = each.value.subnet_ids
+  create_node_group           = true
+  node_group_instance_types  = ["t3.medium"]
+  node_group_desired_size    = 2
+  node_group_min_size        = 1
+  node_group_max_size        = 3
 
-  # new optional toggle — set to false to avoid creating/reading ECR repos
-  create_ecr_repos   = var.create_ecr_repos
+  owner_name                 = each.value.Owner
+  tools_to_install           = each.value.tools_to_install
+  aws_region                  = var.aws_region
+  create_ecr_repos           = var.create_ecr_repos
+
 }
 
 # Outputs
