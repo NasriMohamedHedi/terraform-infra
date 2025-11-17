@@ -52,7 +52,7 @@ resource "aws_iam_role_policy_attachment" "eks_service_policy" {
 resource "aws_security_group" "eks_cluster" {
   count       = var.cluster_name != "" ? 1 : 0
   name_prefix = "${var.cluster_name}-sg-"
-  description = "EKS cluster security group"
+  description = "EKS cluster security group"  
   vpc_id      = var.vpc_id
 
   ingress {
@@ -70,9 +70,14 @@ resource "aws_security_group" "eks_cluster" {
   }
 
   lifecycle {
-    ignore_changes = [id]
+
+    ignore_changes = [
+      description,
+      tags,
+    ]
   }
 }
+
 
 resource "aws_eks_cluster" "cluster" {
   count    = var.cluster_name != "" && length(var.subnet_ids) > 0 ? 1 : 0
