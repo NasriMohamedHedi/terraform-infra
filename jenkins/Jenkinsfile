@@ -324,7 +324,7 @@ done || true'''
 
 
 
-        stage('Send Kubeconfig via Email') {
+               stage('Send Kubeconfig via Email') {
             when { expression { env.SERVICE_TYPE == 'eks' } }
             steps {
                 script {
@@ -351,32 +351,30 @@ Samurai DevOps Team
             }
         }
 
-    stage('Send EC2 SSH Credentials') {
-        when { expression { env.SERVICE_TYPE == 'ec2' } }
-        steps {
-            withCredentials([
-                aws(
-                    credentialsId: 'aws-creds',
+        stage('Send EC2 SSH Credentials') {
+            when { expression { env.SERVICE_TYPE == 'ec2' } }
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-terraform-creds',
                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
                     secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-                )
-            ]) {
-                withEnv(["AWS_DEFAULT_REGION=eu-central-1"]) {
+                ]]) {
+                    withEnv(["AWS_DEFAULT_REGION=eu-central-1"]) {
+                        script {
+                            def payload = readJSON file: 'payload.json'
+                            def instance_name = payload.instances.keySet()[0]
 
-                    script {
-                        def payload = readJSON file: 'payload.json'
-                        def instance_name = payload.instances.keySet()[0]
+                            // Terraform output now works because credentials are present
+                            def ip = sh(
+                                script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'",
+                                returnStdout: true
+                            ).trim()
 
-                        // Terraform output now works because credentials are present
-                        def ip = sh(
-                            script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'",
-                            returnStdout: true
-                        ).trim()
-
-                        emailext(
-                            to: payload.client_email,
-                            subject: "🔑 SSH Access for Your EC2 Instance",
-                            body: """
+                            emailext(
+                                to: payload.client_email,
+                                subject: "🔑 SSH Access for Your EC2 Instance",
+                                body: """
 Hello ${payload.user_name},
 
 Your EC2 instance is ready and reachable at:
@@ -384,18 +382,18 @@ ssh -i client-access-key.pem ubuntu@${ip}
 
 Regards,  
 Samurai DevOps Team
-                            """,
-                            attachmentsPattern: 'client-access-key.pem'
-                        )
+                                """,
+                                attachmentsPattern: 'client-access-key.pem'
+                            )
+                        }
                     }
-
                 }
             }
         }
-    }
 
+    } // END stages
 
-      post {
+    post {
         always {
             sh 'rm -f client-access-key.pem payload.json kubeconfig.yaml inventory.ini || true'
         }
@@ -403,5 +401,4 @@ Samurai DevOps Team
         failure { echo "❌ Pipeline failed — check logs." }
     }
 
-} // CLOSE pipeline
-}
+} // END pipeline
