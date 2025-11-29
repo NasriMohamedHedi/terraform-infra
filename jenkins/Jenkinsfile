@@ -395,13 +395,13 @@ Samurai DevOps Team
     }
 
 
-    post {
+      post {
         always {
             sh 'rm -f client-access-key.pem payload.json kubeconfig.yaml inventory.ini || true'
         }
         success { echo "✅ Pipeline completed successfully!" }
         failure { echo "❌ Pipeline failed — check logs." }
     }
-}
-}
+
+} // CLOSE pipeline
 
