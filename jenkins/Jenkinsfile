@@ -351,18 +351,32 @@ Samurai DevOps Team
             }
         }
 
-        stage('Send EC2 SSH Credentials') {
-            when { expression { env.SERVICE_TYPE == 'ec2' } }
-            steps {
-                script {
-                    def payload = readJSON file: 'payload.json'
-                    def instance_name = payload.instances.keySet()[0]
-                    def ip = sh(script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
+    stage('Send EC2 SSH Credentials') {
+        when { expression { env.SERVICE_TYPE == 'ec2' } }
+        steps {
+            withCredentials([
+                aws(
+                    credentialsId: 'aws-creds',
+                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                )
+            ]) {
+                withEnv(["AWS_DEFAULT_REGION=eu-central-1"]) {
 
-                    emailext(
-                        to: payload.client_email,
-                        subject: "🔑 SSH Access for Your EC2 Instance",
-                        body: """
+                    script {
+                        def payload = readJSON file: 'payload.json'
+                        def instance_name = payload.instances.keySet()[0]
+
+                        // Terraform output now works because credentials are present
+                        def ip = sh(
+                            script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'",
+                            returnStdout: true
+                        ).trim()
+
+                        emailext(
+                            to: payload.client_email,
+                            subject: "🔑 SSH Access for Your EC2 Instance",
+                            body: """
 Hello ${payload.user_name},
 
 Your EC2 instance is ready and reachable at:
@@ -370,13 +384,16 @@ ssh -i client-access-key.pem ubuntu@${ip}
 
 Regards,  
 Samurai DevOps Team
-                        """,
-                        attachmentsPattern: 'client-access-key.pem'
-                    )
+                            """,
+                            attachmentsPattern: 'client-access-key.pem'
+                        )
+                    }
+
                 }
             }
         }
     }
+
 
     post {
         always {
