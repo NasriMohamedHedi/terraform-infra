@@ -121,30 +121,64 @@ pipeline {
             }
         }
 
-        stage('Install Tools on EC2 (Ansible)') {
-            when { expression { env.SERVICE_TYPE == 'ec2' } }
-            steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
-                    script {
-                        def payload = readJSON file: 'payload.json'
-                        def instance_name = payload.instances.keySet()[0]
-                        def ip = sh(script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
+stage('Install Tools on EC2 (Ansible)') {
+  when { expression { env.SERVICE_TYPE == 'ec2' } }
+  steps {
+    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+      script {
+        def payload = readJSON file: 'payload.json'
+        def instance_name = payload.instances.keySet()[0]
+        def ip = sh(script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
 
-                        echo "🖥 EC2 instance IP: ${ip}"
+        echo "🖥 EC2 instance IP: ${ip}"
 
-                        writeFile file: 'inventory.ini', text: """
-                        [ec2]
-                        ${ip} ansible_user=ubuntu ansible_ssh_private_key_file=client-access-key.pem
-                        """
+        // write inventory (unchanged)
+        writeFile file: 'inventory.ini', text: """
+[ec2]
+${ip} ansible_user=ubuntu ansible_ssh_private_key_file=client-access-key.pem
+"""
 
-                        def tools = payload.instances[instance_name].tools_to_install ?: []
-                        def tools_json = writeJSON returnText: true, json: tools
+        def tools = payload.instances[instance_name].tools_to_install ?: []
+        def tools_json = writeJSON returnText: true, json: tools
 
-                        sh "ansible-playbook -i inventory.ini --extra-vars 'tools_to_install=${tools_json}' ansible/install_tools.yml"
-                    }
-                }
-            }
+        // Ensure private key has correct permissions (should already be set earlier)
+        sh "chmod 400 client-access-key.pem || true"
+
+        // Create a local known_hosts file for this workspace and add the host key (non-interactive)
+        sh """
+          mkdir -p "${WORKSPACE}/.ssh"
+          echo "⏳ Scanning host key for ${ip}..."
+          ssh-keyscan -H ${ip} > ${WORKSPACE}/known_hosts 2>/dev/null || true
+          echo "Known hosts file created at: ${WORKSPACE}/known_hosts"
+        """
+
+        // Optional quick connectivity test (helps debug failures)
+        def ok = sh(script: "ssh -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=${WORKSPACE}/known_hosts -i client-access-key.pem ubuntu@${ip} 'echo SSH_OK' || echo SSH_FAIL", returnStdout: true).trim()
+        echo "SSH test result: ${ok}"
+
+        if (ok != 'SSH_OK') {
+          echo "⚠️ SSH connectivity test failed. Common causes:"
+          echo "  • Instance not ready yet (EC2 cloud-init still running)."
+          echo "  • Security group blocking port 22 from the Jenkins agent."
+          echo "  • Wrong username/key (AMI expects another user)."
+          // show netcat test (if available) to verify port 22 is open
+          sh "echo 'Checking TCP port 22...' ; (nc -z -v ${ip} 22 && echo 'PORT_OPEN') || echo 'PORT_CLOSED' || true"
+          // proceed anyway (ansible will show more logs), or uncomment the next line to fail early:
+          // error('SSH test failed — aborting Ansible run')
         }
+
+        // Run ansible-playbook but instruct Ansible to use the workspace known_hosts file
+        withEnv([
+          "ANSIBLE_HOST_KEY_CHECKING=True",
+          "ANSIBLE_SSH_COMMON_ARGS=-o UserKnownHostsFile=${WORKSPACE}/known_hosts -o StrictHostKeyChecking=yes"
+        ]) {
+          sh "ansible-playbook -i inventory.ini --extra-vars 'tools_to_install=${tools_json}' ansible/install_tools.yml"
+        }
+      }
+    }
+  }
+}
+
 
 stage('Deploy Tools on EKS') {
   when { expression { env.SERVICE_TYPE == 'eks' } }
