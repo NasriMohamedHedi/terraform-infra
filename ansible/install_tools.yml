@@ -1,196 +1,138 @@
 # ansible/install_tools.yml
-- name: Install specified tools, CloudWatch Agent and (NICE) DCV + XFCE desktop
+- name: Install tools + CloudWatch Agent + NICE DCV + XFCE
   hosts: all
   become: yes
-  vars_files:
-    - vars_dcv.yml   # optional file (see provided example) - keeps versions centralized
+
   vars:
-    # default fallbacks if not provided in vars_dcv.yml
-    dcv_version: "{{ lookup('vars', 'dcv_version', default='2024.2-1') }}"
-    dcv_ubuntu_folder_map:
-      "20.04": "Ubuntu20.04"
-      "22.04": "Ubuntu22.04"
+    dcv_version: "2024.2-1"
+    dcv_pkg_name: "nice-dcv-server_{{ dcv_version }}_amd64.ubuntu2204.deb"
+    dcv_download_url: "https://d1uj6qtbmh3dt5.cloudfront.net/{{ dcv_version }}/Servers/Ubuntu22.04/x86_64/{{ dcv_pkg_name }}"
+
   tasks:
 
+    # ---------------------------------------------------------
+    # BASE UPDATE
+    # ---------------------------------------------------------
     - name: Update apt cache
       apt:
         update_cache: yes
       when: ansible_os_family == "Debian"
 
+    # ---------------------------------------------------------
+    # CLOUDWATCH AGENT
+    # ---------------------------------------------------------
+    - name: Download CloudWatch Agent
+      get_url:
+        url: https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+        dest: /tmp/amazon-cloudwatch-agent.deb
+        mode: '0644'
+
     - name: Install CloudWatch Agent
-      block:
-        - name: Download CloudWatch Agent package
-          get_url:
-            url: https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
-            dest: /tmp/amazon-cloudwatch-agent.deb
-            mode: '0644'
+      apt:
+        deb: /tmp/amazon-cloudwatch-agent.deb
+        state: present
 
-        - name: Install CloudWatch Agent
-          apt:
-            deb: /tmp/amazon-cloudwatch-agent.deb
-            state: present
+    - name: Configure CloudWatch Agent
+      template:
+        src: amazon-cloudwatch-agent.j2
+        dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+        mode: '0644'
 
-        - name: Configure CloudWatch Agent
-          template:
-            src: amazon-cloudwatch-agent.j2
-            dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-            mode: '0644'
+    - name: Start CloudWatch Agent
+      command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
-        - name: Start CloudWatch Agent service
-          command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-
-    - name: Install tools
+    # ---------------------------------------------------------
+    # INSTALL CUSTOM TOOLS
+    # ---------------------------------------------------------
+    - name: Install requested tools
       apt:
         name: "{{ tools_to_install }}"
         state: present
-      when:
-        - tools_to_install is defined
-        - tools_to_install | length > 0
+      when: tools_to_install is defined and tools_to_install | length > 0
 
-    ########################################
-    # NICE DCV + minimal XFCE desktop below
-    ########################################
-    - name: Skip DCV tasks on non-Debian OS
+
+    # ---------------------------------------------------------
+    # DESKTOP (XFCE)
+    # ---------------------------------------------------------
+    - name: Install XFCE minimal desktop
+      apt:
+        name:
+          - xfce4
+          - xfce4-terminal
+          - xorg
+          - dbus-x11
+          - policykit-1
+          - lightdm
+        state: present
+        update_cache: yes
+
+
+    # ---------------------------------------------------------
+    # NICE DCV INSTALLATION
+    # ---------------------------------------------------------
+
+    - name: Install DCV dependencies
+      apt:
+        name:
+          - libgl1
+          - libxcb-icccm4
+          - libxcb-image0
+          - libxcb-keysyms1
+          - libxcb-randr0
+          - libxcb-render-util0
+          - libxcb-xinerama0
+          - ca-certificates
+          - wget
+        state: present
+
+    - name: Download DCV package
+      get_url:
+        url: "{{ dcv_download_url }}"
+        dest: "/tmp/{{ dcv_pkg_name }}"
+        mode: '0644'
+      register: dcv_download
+      failed_when: dcv_download.status != 200
+
+    - name: Install DCV
+      apt:
+        deb: "/tmp/{{ dcv_pkg_name }}"
+        state: present
+
+    - name: Enable & start DCV server
+      systemd:
+        name: dcvserver
+        enabled: yes
+        state: started
+
+    - name: Add ubuntu user to video group
+      user:
+        name: ubuntu
+        groups: video
+        append: yes
+
+    - name: Create default dcv.ini
+      copy:
+        dest: /etc/dcv/dcv.ini
+        content: |
+          [license]
+          # Leave empty for evaluation mode
+
+          [session-management]
+          create-session = true
+
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Restart DCV server
+      systemd:
+        name: dcvserver
+        state: restarted
+
+    - name: Print DCV connection URL
       debug:
-        msg: "Non-Debian host - skipping DCV/XFCE installation"
-      when: ansible_os_family != "Debian"
-
-    - block:
-        - name: Map Ubuntu version (short) and choose folder
-          set_fact:
-            ubuntu_short: "{{ ansible_distribution_version.split('.')[0] ~ '.' ~ ansible_distribution_version.split('.')[1] }}"
-            ubuntu_folder: >-
-              {{
-                (dcv_ubuntu_folder_map[ubuntu_short] | default(
-                   ( ('Ubuntu' + ansible_distribution_version.split('.')[0] ~ '.' ~ ansible_distribution_version.split('.')[1]) )
-                ))
-              }}
-
-        - name: Install minimal desktop prerequisites (XFCE minimal)
-          apt:
-            name:
-              - xfce4
-              - xfce4-terminal
-              - xorg
-              - dbus-x11
-              - policykit-1
-              - pulseaudio
-            state: present
-            update_cache: yes
-
-        - name: Install additional packages required by DCV
-          apt:
-            name:
-              - libgl1
-              - libxcb-icccm4
-              - libxcb-image0
-              - libxcb-keysyms1
-              - libxcb-randr0
-              - libxcb-render-util0
-              - libxcb-xinerama0
-              - ca-certificates
-              - wget
-              - apt-transport-https
-              - gnupg
-            state: present
-
-        - name: Build candidate DCV package filename & URL (attempt common path patterns)
-          set_fact:
-            dcv_pkg_name: "nice-dcv-server_{{ dcv_version }}_amd64.deb"
-            dcv_try_urls:
-              - "https://d1uj6qtbmh3dt5.cloudfront.net/{{ dcv_version }}/Servers/{{ ubuntu_folder }}/x86_64/{{ dcv_pkg_name }}"
-              - "https://d1uj6qtbmh3dt5.cloudfront.net/{{ dcv_version }}/Servers/Ubuntu20.04/x86_64/{{ dcv_pkg_name }}"  # fallback
-              - "https://ni-sp.com/dcv-download/{{ dcv_pkg_name }}"  # fallback to vendor-hosted placeholder
-
-        - name: Try to download DCV package from candidate URLs (first that works)
-          block:
-            - name: Attempt download from list (stop when succeeds)
-              vars:
-                downloaded: false
-              block:
-                - name: Ensure /tmp exists
-                  file:
-                    path: /tmp
-                    state: directory
-
-                - name: Download (iterate URLs) until success
-                  block:
-                    - name: Try download URL {{ item }}
-                      get_url:
-                        url: "{{ item }}"
-                        dest: "/tmp/{{ dcv_pkg_name }}"
-                        timeout: 60
-                        validate_certs: yes
-                      register: download_result
-                      failed_when: false
-                      with_items: "{{ dcv_try_urls }}"
-                      loop_control:
-                        label: "{{ item }}"
-                    - name: Find first successful download
-                      set_fact:
-                        _download_success_index: "{{ (download_result.results | selectattr('status', 'defined') | selectattr('status','==',200) | list | first).item | default(None) }}"
-                      when: download_result is defined
-                  rescue:
-                    - name: Debug download failure
-                      debug:
-                        msg: "DCV package download attempts failed. You may need to update dcv_version or provide a working URL."
-
-          rescue:
-            - name: Fail if DCV package not present after attempts
-              stat:
-                path: "/tmp/{{ dcv_pkg_name }}"
-              register: dcv_stat
-            - name: Abort: DCV package not downloaded
-              fail:
-                msg: "/tmp/{{ dcv_pkg_name }} not found after download attempts. Check dcv_version or URL."
-
-        - name: Install DCV server DEB package
-          apt:
-            deb: "/tmp/{{ dcv_pkg_name }}"
-            state: present
-
-        - name: Ensure dcvserver service is enabled and started
-          systemd:
-            name: dcvserver
-            state: started
-            enabled: yes
-            daemon_reload: yes
-
-        - name: Add ubuntu user to video group (helps with display)
-          user:
-            name: ubuntu
-            groups: video
-            append: yes
-
-        - name: Create /etc/dcv/dcv.ini if missing (minimal config)
-          copy:
-            dest: /etc/dcv/dcv.ini
-            content: |
-              [license]
-              # license file or token goes here if you have one. Leave blank for evaluation.
-              # license_file = /etc/dcv/nice-dcv-license.lic
-
-              [ssl]
-              # Use DCV's default self-signed cert, or configure your own:
-              # key = /etc/dcv/keys/server.key
-              # cert = /etc/dcv/keys/server.crt
-          owner: root
-          group: root
-          mode: '0644'
-          force: no
-
-        - name: Restart dcvserver to pick up config
-          systemd:
-            name: dcvserver
-            state: restarted
-
-        - name: Print DCV connection info
-          debug:
-            msg: |
-              NICE DCV installed & running.
-              Connect using DCV client to: https://{{ ansible_default_ipv4.address }}:8443
-              If you use browser connect (web), ensure TCP port 8443 is open in the instance SG.
-              If authentication required, use ubuntu user (or configure SSO/LDAP as needed).
-      when: ansible_os_family == "Debian"
-
+        msg: |
+          NICE DCV is now running!
+          Connect via:
+          https://{{ ansible_default_ipv4.address }}:8443
 
