@@ -1,4 +1,3 @@
----
 - name: Fully automatic NICE DCV installation for EC2
   hosts: all
   become: yes
@@ -16,7 +15,7 @@
     - debug:
         msg: "Detected OS: {{ os_family }} version {{ os_release }}"
 
-    - name: Install required packages for both OS types
+    - name: Install required packages
       package:
         name:
           - curl
@@ -24,84 +23,59 @@
           - jq
         state: present
 
-    - name: Get NICE DCV latest version number
+    # 🔥 FIXED — Always get the right DCV latest version
+    - name: Fetch latest DCV version from official metadata
       shell: |
-        curl -s https://d1uj6qtbmh3dt5.cloudfront.net | \
-        grep -oP 'href="\K[0-9.]+' | sort -V | tail -1
+        curl -s https://d1uj6qtbmh3dt5.cloudfront.net/latest_version.json | jq -r '.server'
       register: dcv_version_raw
 
-    - name: Set DCV version fact
+    - name: Set DCV version
       set_fact:
         dcv_version: "{{ dcv_version_raw.stdout }}"
 
     - debug:
-        msg: "Installing NICE DCV version {{ dcv_version }}"
+        msg: "Latest DCV version is {{ dcv_version }}"
+
+    # 🔥 FIXED URL LOGIC ACCORDING TO AMAZON STRUCTURE
+    - name: Set download URL for Ubuntu
+      when: os_family == "Debian"
+      set_fact:
+        dcv_package: "{{ dcv_base_url }}/{{ dcv_version }}/Servers/Ubuntu22.04/x86_64/nice-dcv-server_{{ dcv_version }}-1_amd64.ubuntu22.04.deb"
 
     - name: Set download URL for Amazon Linux
       when: os_family == "RedHat"
       set_fact:
-        dcv_package: "{{ dcv_base_url }}/{{ dcv_version }}/nice-dcv-{{ dcv_version }}-el7-x86_64.tgz"
+        dcv_package: "{{ dcv_base_url }}/{{ dcv_version }}/Servers/EL7/x86_64/nice-dcv-server-{{ dcv_version }}-1.el7.x86_64.rpm"
 
-    - name: Set download URL for Ubuntu
-      when: os_family == "Debian"
-      set_fact:
-        dcv_package: "{{ dcv_base_url }}/{{ dcv_version }}/nice-dcv-{{ dcv_version }}-ubuntu20.04-x86_64.tgz"
+    - debug:
+        msg: "Downloading DCV from: {{ dcv_package }}"
 
     - name: Download DCV package
       get_url:
         url: "{{ dcv_package }}"
-        dest: "/tmp/dcv.tgz"
-
-    - name: Extract DCV package
-      unarchive:
-        src: "/tmp/dcv.tgz"
-        dest: "/tmp"
-        remote_src: yes
-
-    - name: Install DCV on Amazon Linux / RHEL
-      when: os_family == "RedHat"
-      shell: |
-        yum localinstall -y /tmp/nice-dcv-{{ dcv_version }}-el7-x86_64/*.rpm
-
-    - name: Install DCV on Ubuntu
+        dest: "/tmp/dcv_package.deb"
       when: os_family == "Debian"
-      shell: |
-        apt install -y /tmp/nice-dcv-{{ dcv_version }}-ubuntu20.04-x86_64/*.deb
 
-    - name: Install GPU libraries (if GPU instance)
-      package:
-        name:
-          - nvidia-driver-latest-dkms
-          - libglvnd
+    - name: Download DCV package (RedHat)
+      get_url:
+        url: "{{ dcv_package }}"
+        dest: "/tmp/dcv_package.rpm"
+      when: os_family == "RedHat"
+
+    - name: Install DCV (Ubuntu)
+      apt:
+        deb: "/tmp/dcv_package.deb"
+      when: os_family == "Debian"
+
+    - name: Install DCV (RedHat)
+      yum:
+        name: "/tmp/dcv_package.rpm"
         state: present
-      ignore_errors: yes
+      when: os_family == "RedHat"
 
     - name: Enable and start DCV
       systemd:
         name: dcvserver
         state: started
         enabled: yes
-
-    - name: Download CloudWatch Agent (Amazon Linux)
-      when: os_family == "RedHat"
-      get_url:
-        url: "https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm"
-        dest: "/tmp/cw.rpm"
-
-    - name: Install CloudWatch Agent (Amazon Linux)
-      when: os_family == "RedHat"
-      yum:
-        name: "/tmp/cw.rpm"
-        state: present
-
-    - name: Install CloudWatch Agent (Ubuntu)
-      when: os_family == "Debian"
-      apt:
-        deb: "https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb"
-
-    - name: Start CloudWatch Agent
-      command: >
-        /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
-        -a start -m ec2
-        -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
