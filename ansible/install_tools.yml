@@ -1,251 +1,132 @@
 ---
-# ansible/install_tools.yml
-- name: Install tools + CloudWatch Agent + Amazon DCV Server + XFCE (auto-detect + latest)
+- name: Fully automatic NICE DCV installation for EC2
   hosts: all
   become: yes
+
   vars:
-    # page to parse for "latest" long-lived links
-    dcv_latest_page: "https://www.amazondcv.com/latest.html"
-    # fallback cloudfront base (rarely used)
-    cloudfront_domain: "d1uj6qtbmh3dt5.cloudfront.net"
+    dcv_base_url: "https://d1uj6qtbmh3dt5.cloudfront.net"
+
   tasks:
 
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-      when: ansible_os_family == "Debian"
+    ###########################################################################
+    # Detect OS TYPE (Amazon Linux / Ubuntu)
+    ###########################################################################
+    - name: Detect OS family
+    set_fact:
+      os_family: "{{ ansible_facts.os_family }}"
+      os_release: "{{ ansible_facts.distribution_version }}"
 
-    - name: Install prerequisites for downloads & XFCE + DCV deps
-      apt:
+    - debug:
+        msg: "Detected OS: {{ os_family }} version {{ os_release }}"
+
+    ###########################################################################
+    # Make sure required tools exist
+    ###########################################################################
+    - name: Install required packages for both OS types
+      package:
         name:
-          - wget
           - curl
-          - ca-certificates
-          - apt-transport-https
-          - gnupg
-          - xfce4
-          - xfce4-terminal
-          - xorg
-          - dbus-x11
-          - policykit-1
-          - pulseaudio
-          - libgl1
-          - libxcb-icccm4
-          - libxcb-image0
-          - libxcb-keysyms1
-          - libxcb-randr0
-          - libxcb-render-util0
-          - libxcb-xinerama0
+          - unzip
+          - jq
         state: present
-        update_cache: yes
 
-    ####################################################################
-    # CloudWatch agent (existing behavior)
-    ####################################################################
-    - name: Download CloudWatch Agent package
+    ###########################################################################
+    # Fetch the latest version dynamically from DCV repo
+    ###########################################################################
+    - name: Get NICE DCV latest version number
+      shell: |
+        curl -s https://d1uj6qtbmh3dt5.cloudfront.net | \
+        grep -oP 'href="\K[0-9.]+' | sort -V | tail -1
+      register: dcv_version_raw
+
+    - name: Set DCV version fact
+      set_fact:
+        dcv_version: "{{ dcv_version_raw.stdout }}"
+
+    - debug:
+        msg: "Installing NICE DCV version {{ dcv_version }}"
+
+    ###########################################################################
+    # Download correct DCV package based on OS
+    ###########################################################################
+    - name: Set download URL for Amazon Linux
+      when: os_family == "RedHat"
+      set_fact:
+        dcv_package: "{{ dcv_base_url }}/{{ dcv_version }}/nice-dcv-{{ dcv_version }}-el7-x86_64.tgz"
+
+    - name: Set download URL for Ubuntu
+      when: os_family == "Debian"
+      set_fact:
+        dcv_package: "{{ dcv_base_url }}/{{ dcv_version }}/nice-dcv-{{ dcv_version }}-ubuntu20.04-x86_64.tgz"
+
+    - name: Download DCV package
       get_url:
-        url: https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
-        dest: /tmp/amazon-cloudwatch-agent.deb
-        mode: '0644'
+        url: "{{ dcv_package }}"
+        dest: "/tmp/dcv.tgz"
 
-    - name: Install CloudWatch Agent
-      apt:
-        deb: /tmp/amazon-cloudwatch-agent.deb
+    - name: Extract DCV package
+      unarchive:
+        src: "/tmp/dcv.tgz"
+        dest: "/tmp"
+        remote_src: yes
+
+    ###########################################################################
+    # Install DCV based on OS TYPE
+    ###########################################################################
+    - name: Install DCV on Amazon Linux / RHEL
+      when: os_family == "RedHat"
+      shell: |
+        yum localinstall -y /tmp/nice-dcv-{{ dcv_version }}-el7-x86_64/*.rpm
+
+    - name: Install DCV on Ubuntu
+      when: os_family == "Debian"
+      shell: |
+        apt install -y /tmp/nice-dcv-{{ dcv_version }}-ubuntu20.04-x86_64/*.deb
+
+    ###########################################################################
+    # GPU Driver / GL libraries (if instance is GPU)
+    ###########################################################################
+    - name: Install required GPU libraries
+      package:
+        name: 
+          - nvidia-driver-latest-dkms
+          - libglvnd
         state: present
+      ignore_errors: yes   # works for non-GPU EC2 instances too
 
-    - name: Write minimal CloudWatch config
-      copy:
-        dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-        content: |
-          {
-            "agent": {
-              "metrics_collection_interval": 60,
-              "run_as_user": "root"
-            },
-            "metrics": {
-              "namespace": "EC2/CWAgent",
-              "metrics_collected": {
-                "cpu": { "measurement": ["cpu_usage_idle"], "metrics_collection_interval": 60 },
-                "mem": { "measurement": ["mem_used_percent"], "metrics_collection_interval": 60 }
-              }
-            }
-          }
-        mode: '0644'
-
-    - name: Start CloudWatch Agent
-      command: >
-        /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
-        -a fetch-config -m ec2 -s
-        -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-      args:
-        warn: false
-
-    ####################################################################
-    # Additional requested tools (from payload)
-    ####################################################################
-    - name: Install extra requested tools (if any)
-      apt:
-        name: "{{ tools_to_install }}"
-        state: present
-      when:
-        - tools_to_install is defined
-        - tools_to_install | length > 0
-
-    ####################################################################
-    # DCV auto-detect + download + install
-    ####################################################################
-    - name: Determine Ubuntu major.minor (e.g. "22.04" or "20.04")
-      set_fact:
-        ubuntu_short: "{{ ansible_distribution_version.split('.')[0] ~ '.' ~ ansible_distribution_version.split('.')[1] }}"
-
-    - name: Map ubuntu_short -> DCV folder name (Ubuntu22.04 / Ubuntu20.04 / Ubuntu24.04)
-      set_fact:
-        ubuntu_dcv_dir: >-
-          {{ {
-              '20.04': 'Ubuntu20.04',
-              '22.04': 'Ubuntu22.04',
-              '24.04': 'Ubuntu24.04'
-          }[ubuntu_short] | default('Ubuntu' + ubuntu_short | replace('.', '') ) }}
-
-    - name: Fetch Amazon DCV "latest" HTML page (long-lasting links)
-      uri:
-        url: "{{ dcv_latest_page }}"
-        return_content: yes
-      register: dcv_latest_page_raw
-
-    - name: Try extracting a server .deb URL for this Ubuntu dir (Servers/.../x86_64/*.deb)
-      set_fact:
-        dcv_candidate_urls: >-
-          {{ (dcv_latest_page_raw.content | default(''))  |
-             regex_findall('https?://[^\\\"\\']+/Servers/{{ ubuntu_dcv_dir }}/x86_64/[^\\\"\\']+\\.deb') | unique }}
-
-    - name: If no Servers/.../x86_64/.deb found, try any cloudfront .deb mentioning ubuntu version
-      set_fact:
-        dcv_candidate_urls: >-
-          {{ dcv_candidate_urls if (dcv_candidate_urls | length) > 0 else
-             (dcv_latest_page_raw.content | default('') |
-               regex_findall('https?://[^\\\"\\']+' ~ cloudfront_domain ~ '[^\\\"\\']*ubuntu' ~ (ubuntu_short | replace('.','')) ~ '[^\\\"\\']*\\.deb') | unique) }}
-
-    - name: If still none, attempt generic pattern (nice-dcv-ubuntu<ver>-x86_64.*) (fallback tgz)
-      set_fact:
-        dcv_candidate_urls: >-
-          {{ dcv_candidate_urls if (dcv_candidate_urls | length) > 0 else
-             (dcv_latest_page_raw.content | default('') |
-               regex_findall('https?://[^\\\"\\']+/[^\\\"\\']*nice-dcv[^\\\"\\']*ubuntu' ~ (ubuntu_short | replace('.','')) ~ '[^\\\"\\']*\\.(tgz|tar.gz|deb)') | unique) }}
-
-    - name: Debug candidate URLs (first 5)
-      debug:
-        var: dcv_candidate_urls[0:5]
-
-    - name: Fail early if no candidate URL found
-      fail:
-        msg: |
-          Could not find any Amazon DCV server package URL for Ubuntu {{ ubuntu_short }} on {{ dcv_latest_page }}.
-          The playbook tried to parse the official latest page but found nothing matching Server/Ubuntu{{ ubuntu_short }}.
-          You can set variable dcv_download_url manually to override.
-      when: dcv_candidate_urls is not defined or (dcv_candidate_urls | length) == 0
-
-    - name: Choose first candidate URL
-      set_fact:
-        dcv_download_url: "{{ dcv_candidate_urls[0] }}"
-        dcv_pkg_filename: "{{ (dcv_candidate_urls[0] | regex_replace('.*/','')) }}"
-
-    - name: Debug final chosen URL
-      debug:
-        msg: "Chose DCV URL: {{ dcv_download_url }} (file: {{ dcv_pkg_filename }})"
-
-    - name: Download chosen DCV package to /tmp
-      get_url:
-        url: "{{ dcv_download_url }}"
-        dest: "/tmp/{{ dcv_pkg_filename }}"
-        mode: "0644"
-        timeout: 120
-      register: dcv_download
-      until: dcv_download is succeeded
-      retries: 2
-      delay: 5
-
-    - name: Ensure downloaded file exists
-      stat:
-        path: "/tmp/{{ dcv_pkg_filename }}"
-      register: dcv_pkg_stat
-
-    - name: Fail if package didn't download
-      fail:
-        msg: "DCV package was not downloaded to /tmp/{{ dcv_pkg_filename }}; URL: {{ dcv_download_url }}"
-      when: not dcv_pkg_stat.stat.exists
-
-    - name: Install DCV package (.deb) if downloaded .deb
-      apt:
-        deb: "/tmp/{{ dcv_pkg_filename }}"
-        state: present
-      when: dcv_pkg_filename.endswith('.deb')
-
-    - name: If package is archive (tgz/tar.gz) - try extract and run installer (best-effort)
-      block:
-        - name: Create temp dir for archive
-          file:
-            path: /tmp/dcv_extract
-            state: directory
-            mode: '0755'
-
-        - name: Extract archive
-          unarchive:
-            src: "/tmp/{{ dcv_pkg_filename }}"
-            dest: /tmp/dcv_extract
-            remote_src: yes
-
-        - name: Run discovered install script (if present) - best-effort
-          shell: |
-            set -e
-            if [ -x /tmp/dcv_extract/install.sh ]; then
-              /tmp/dcv_extract/install.sh || true
-            elif [ -x /tmp/dcv_extract/bin/install.sh ]; then
-              /tmp/dcv_extract/bin/install.sh || true
-            fi
-          args:
-            executable: /bin/bash
-      when: dcv_pkg_filename.endswith('.tgz') or dcv_pkg_filename.endswith('.tar.gz')
-
-    - name: Enable & start DCV server service (if present)
+    ###########################################################################
+    # Start DCV Service
+    ###########################################################################
+    - name: Enable and start DCV
       systemd:
         name: dcvserver
         state: started
         enabled: yes
-        daemon_reload: yes
-      ignore_errors: yes
 
-    - name: Add ubuntu user to video group (helpful for display access)
-      user:
-        name: ubuntu
-        groups: video
-        append: yes
-      ignore_errors: yes
+    ###########################################################################
+    # Install & Start CloudWatch Agent (NO WARN ERROR)
+    ###########################################################################
+    - name: Download CloudWatch Agent
+      get_url:
+        url: "https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm"
+        dest: "/tmp/cw.rpm"
+      when: os_family == "RedHat"
 
-    - name: Create minimal DCV config file if missing
-      copy:
-        dest: /etc/dcv/dcv.ini
-        content: |
-          [license]
-          # put license_file = /etc/dcv/nice-dcv-license.lic if you have a license
-          [ssl]
-        owner: root
-        group: root
-        mode: '0644'
-        force: no
-      ignore_errors: yes
+    - name: Install CloudWatch Agent (Amazon Linux)
+      yum:
+        name: "/tmp/cw.rpm"
+        state: present
+      when: os_family == "RedHat"
 
-    - name: Restart DCV service (best-effort)
-      systemd:
-        name: dcvserver
-        state: restarted
-      ignore_errors: yes
+    - name: Install CloudWatch Agent (Ubuntu)
+      apt:
+        deb: "https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb"
+      when: os_family == "Debian"
 
-    - name: Print DCV connection info
-      debug:
-        msg: |
-          DCV install attempted.
-          Host IP: {{ ansible_default_ipv4.address | default('UNKNOWN') }}
-          If DCV server installed, connect to https://{{ ansible_default_ipv4.address }}:8443
-          Ensure security group allows inbound TCP 8443.
+    - name: Start CloudWatch Agent
+      command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                -a start \
+                -m ec2 \
+                -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
 
