@@ -8,20 +8,14 @@
 
   tasks:
 
-    ###########################################################################
-    # Detect OS TYPE (Amazon Linux / Ubuntu)
-    ###########################################################################
     - name: Detect OS family
-    set_fact:
-      os_family: "{{ ansible_facts.os_family }}"
-      os_release: "{{ ansible_facts.distribution_version }}"
+      set_fact:
+        os_family: "{{ ansible_facts.os_family }}"
+        os_release: "{{ ansible_facts.distribution_version }}"
 
     - debug:
         msg: "Detected OS: {{ os_family }} version {{ os_release }}"
 
-    ###########################################################################
-    # Make sure required tools exist
-    ###########################################################################
     - name: Install required packages for both OS types
       package:
         name:
@@ -30,9 +24,6 @@
           - jq
         state: present
 
-    ###########################################################################
-    # Fetch the latest version dynamically from DCV repo
-    ###########################################################################
     - name: Get NICE DCV latest version number
       shell: |
         curl -s https://d1uj6qtbmh3dt5.cloudfront.net | \
@@ -46,9 +37,6 @@
     - debug:
         msg: "Installing NICE DCV version {{ dcv_version }}"
 
-    ###########################################################################
-    # Download correct DCV package based on OS
-    ###########################################################################
     - name: Set download URL for Amazon Linux
       when: os_family == "RedHat"
       set_fact:
@@ -70,9 +58,6 @@
         dest: "/tmp"
         remote_src: yes
 
-    ###########################################################################
-    # Install DCV based on OS TYPE
-    ###########################################################################
     - name: Install DCV on Amazon Linux / RHEL
       when: os_family == "RedHat"
       shell: |
@@ -83,50 +68,40 @@
       shell: |
         apt install -y /tmp/nice-dcv-{{ dcv_version }}-ubuntu20.04-x86_64/*.deb
 
-    ###########################################################################
-    # GPU Driver / GL libraries (if instance is GPU)
-    ###########################################################################
-    - name: Install required GPU libraries
+    - name: Install GPU libraries (if GPU instance)
       package:
-        name: 
+        name:
           - nvidia-driver-latest-dkms
           - libglvnd
         state: present
-      ignore_errors: yes   # works for non-GPU EC2 instances too
+      ignore_errors: yes
 
-    ###########################################################################
-    # Start DCV Service
-    ###########################################################################
     - name: Enable and start DCV
       systemd:
         name: dcvserver
         state: started
         enabled: yes
 
-    ###########################################################################
-    # Install & Start CloudWatch Agent (NO WARN ERROR)
-    ###########################################################################
-    - name: Download CloudWatch Agent
+    - name: Download CloudWatch Agent (Amazon Linux)
+      when: os_family == "RedHat"
       get_url:
         url: "https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm"
         dest: "/tmp/cw.rpm"
-      when: os_family == "RedHat"
 
     - name: Install CloudWatch Agent (Amazon Linux)
+      when: os_family == "RedHat"
       yum:
         name: "/tmp/cw.rpm"
         state: present
-      when: os_family == "RedHat"
 
     - name: Install CloudWatch Agent (Ubuntu)
+      when: os_family == "Debian"
       apt:
         deb: "https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb"
-      when: os_family == "Debian"
 
     - name: Start CloudWatch Agent
-      command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-                -a start \
-                -m ec2 \
-                -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-
+      command: >
+        /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+        -a start -m ec2
+        -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
