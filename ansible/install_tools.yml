@@ -1,81 +1,108 @@
+---
 - name: Fully automatic NICE DCV installation for EC2
   hosts: all
   become: yes
 
   vars:
-    dcv_base_url: "https://d1uj6qtbmh3dt5.cloudfront.net"
+    aws_dcv_metadata_url: "https://d1uj6qtbmh3dt5.cloudfront.net/"
 
   tasks:
 
-    - name: Detect OS family
-      set_fact:
-        os_family: "{{ ansible_facts.os_family }}"
-        os_release: "{{ ansible_facts.distribution_version }}"
+    ###########################################################################
+    # 1) Detect OS
+    ###########################################################################
+    - name: Gather OS facts
+    - setup:
 
-    - debug:
-        msg: "Detected OS: {{ os_family }} version {{ os_release }}"
+    - name: Detect OS
+      debug:
+        msg: "Detected {{ ansible_distribution }} {{ ansible_distribution_major_version }}"
 
-    - name: Install required packages
+    ###########################################################################
+    # 2) Install base dependencies
+    ###########################################################################
+    - name: Install required tools
       package:
         name:
           - curl
-          - unzip
           - jq
+          - tar
+          - wget
         state: present
 
-    # 🔥 FIXED — Always get the right DCV latest version
-    - name: Fetch latest DCV version from official metadata
+    ###########################################################################
+    # 3) Fetch LATEST DCV server version from AWS metadata
+    ###########################################################################
+    - name: Fetch XML metadata
       shell: |
-        curl -s https://d1uj6qtbmh3dt5.cloudfront.net/latest_version.json | jq -r '.server'
-      register: dcv_version_raw
+        curl -s {{ aws_dcv_metadata_url }}server/latest.xml
+      register: dcv_xml
 
-    - name: Set DCV version
+    - name: Parse version from XML
       set_fact:
-        dcv_version: "{{ dcv_version_raw.stdout }}"
+        dcv_version: "{{ dcv_xml.stdout | regex_search('<Version>(.*?)</Version>', '\\1') }}"
 
-    - debug:
-        msg: "Latest DCV version is {{ dcv_version }}"
+    - name: Show detected DCV version
+      debug:
+        msg: "Latest DCV version found: {{ dcv_version }}"
 
-    # 🔥 FIXED URL LOGIC ACCORDING TO AMAZON STRUCTURE
-    - name: Set download URL for Ubuntu
-      when: os_family == "Debian"
+    ###########################################################################
+    # 4) Build download URL for correct OS dynamically
+    ###########################################################################
+    - name: Set DCV package URL based on OS
       set_fact:
-        dcv_package: "{{ dcv_base_url }}/{{ dcv_version }}/Servers/Ubuntu22.04/x86_64/nice-dcv-server_{{ dcv_version }}-1_amd64.ubuntu22.04.deb"
+        dcv_pkg_url: >-
+          {% if ansible_os_family == 'Debian' %}
+          {{ aws_dcv_metadata_url }}server/{{ dcv_version }}/nice-dcv-server_{{ dcv_version }}-1_amd64.ubuntu20.04.deb
+          {% elif ansible_os_family == 'RedHat' %}
+          {{ aws_dcv_metadata_url }}server/{{ dcv_version }}/nice-dcv-server-{{ dcv_version }}-1.el7.x86_64.rpm
+          {% endif %}
 
-    - name: Set download URL for Amazon Linux
-      when: os_family == "RedHat"
-      set_fact:
-        dcv_package: "{{ dcv_base_url }}/{{ dcv_version }}/Servers/EL7/x86_64/nice-dcv-server-{{ dcv_version }}-1.el7.x86_64.rpm"
+    - name: Show final package URL
+      debug:
+        msg: "Downloading: {{ dcv_pkg_url }}"
 
-    - debug:
-        msg: "Downloading DCV from: {{ dcv_package }}"
-
-    - name: Download DCV package
+    ###########################################################################
+    # 5) Download DCV package
+    ###########################################################################
+    - name: Download DCV installer
       get_url:
-        url: "{{ dcv_package }}"
-        dest: "/tmp/dcv_package.deb"
-      when: os_family == "Debian"
+        url: "{{ dcv_pkg_url }}"
+        dest: "/tmp/dcv.pkg"
 
-    - name: Download DCV package (RedHat)
-      get_url:
-        url: "{{ dcv_package }}"
-        dest: "/tmp/dcv_package.rpm"
-      when: os_family == "RedHat"
-
-    - name: Install DCV (Ubuntu)
+    ###########################################################################
+    # 6) Install DCV depending on OS type
+    ###########################################################################
+    - name: Install DCV on Ubuntu/Debian
       apt:
-        deb: "/tmp/dcv_package.deb"
-      when: os_family == "Debian"
+        deb: "/tmp/dcv.pkg"
+      when: ansible_os_family == "Debian"
 
-    - name: Install DCV (RedHat)
+    - name: Install DCV on RHEL/Amazon Linux
       yum:
-        name: "/tmp/dcv_package.rpm"
+        name: "/tmp/dcv.pkg"
         state: present
-      when: os_family == "RedHat"
+      when: ansible_os_family == "RedHat"
 
-    - name: Enable and start DCV
+    ###########################################################################
+    # 7) Enable & start DCV
+    ###########################################################################
+    - name: Enable DCV service
       systemd:
         name: dcvserver
         state: started
         enabled: yes
+
+    ###########################################################################
+    # 8) Configure firewall
+    ###########################################################################
+    - name: Allow DCV TCP ports
+      shell: |
+        ufw allow 8443/tcp || true
+        iptables -A INPUT -p tcp --dport 8443 -j ACCEPT || true
+      ignore_errors: yes
+
+    - name: Final message
+      debug:
+        msg: "DCV installation completed successfully ✔ — your EC2 is now DCV-ready."
 
