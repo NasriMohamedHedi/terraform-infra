@@ -93,14 +93,14 @@
     # DETECT LATEST DCV VERSION + CORRECT UBUNTU PATH
     ##################################################################
 
-    - name: Determine Ubuntu major.minor version (22.04 or 20.04)
+    - name: Determine Ubuntu short version
       set_fact:
-        ubuntu_version_short: "{{ ansible_distribution_version.split('.')[0] }}.{{ ansible_distribution_version.split('.')[1] }}"
+        ubuntu_major: "{{ ansible_distribution_version.split('.')[0] }}"
+        ubuntu_minor: "{{ ansible_distribution_version.split('.')[1] }}"
 
-    - name: Resolve DCV directory based on Ubuntu version
+    - name: Build Ubuntu DCV folder name (20.04 or 22.04)
       set_fact:
-        ubuntu_dcv_dir: "{{ 'Ubuntu' + ubuntu_version_short }}"
-      when: ubuntu_version_short in ['22.04','20.04']
+        ubuntu_dcv_dir: "Ubuntu{{ ubuntu_major }}.{{ ubuntu_minor }}"
 
     - name: Fetch DCV download index page
       uri:
@@ -108,17 +108,22 @@
         return_content: yes
       register: dcv_index
 
+    # Extract first version match (fix for earlier list problem)
     - name: Detect latest DCV version dynamically
       set_fact:
-        latest_dcv_version: "{{ dcv_index.content | regex_search('(202[0-9]\\.[0-9]+)', '\\1') }}"
+        dcv_version_list: "{{ dcv_index.content | regex_findall('(202[0-9]\\.[0-9]+)') }}"
+
+    - name: Extract DCV version from list
+      set_fact:
+        dcv_version: "{{ dcv_version_list[0] }}"
 
     - name: Build DCV package filename
       set_fact:
-        dcv_pkg: "nice-dcv-server_{{ latest_dcv_version }}_amd64.ubuntu{{ ubuntu_version_short|replace('.','') }}.deb"
+        dcv_pkg: "nice-dcv-server_{{ dcv_version }}_amd64.ubuntu{{ ubuntu_major }}{{ ubuntu_minor }}.deb"
 
     - name: Build final DCV URL
       set_fact:
-        dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/{{ latest_dcv_version }}/Servers/{{ ubuntu_dcv_dir }}/x86_64/{{ dcv_pkg }}"
+        dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/{{ dcv_version }}/Servers/{{ ubuntu_dcv_dir }}/x86_64/{{ dcv_pkg }}"
 
     - name: Debug DCV download URL
       debug:
@@ -170,6 +175,6 @@
     - name: Print connection info
       debug:
         msg: |
-          DCV installed.
+          DCV installed successfully.
           Connect via: https://{{ ansible_default_ipv4.address }}:8443
 
