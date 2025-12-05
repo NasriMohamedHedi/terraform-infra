@@ -1,35 +1,59 @@
 ---
-- name: Install tools + CloudWatch Agent + DCV + XFCE (auto-detect + auto-version)
+# ansible/install_tools.yml
+- name: Install tools + CloudWatch Agent + Amazon DCV Server + XFCE (auto-detect + latest)
   hosts: all
   become: yes
   vars:
-    # optional: set to a specific DCV download domain if you want to pin
-    dcv_base_domain: "https://d1uj6qtbmh3dt5.cloudfront.net"
-
+    # page to parse for "latest" long-lived links
+    dcv_latest_page: "https://www.amazondcv.com/latest.html"
+    # fallback cloudfront base (rarely used)
+    cloudfront_domain: "d1uj6qtbmh3dt5.cloudfront.net"
   tasks:
 
-    ##################################################################
-    # BASE SYSTEM + CLOUDWATCH AGENT
-    ##################################################################
     - name: Update apt cache
       apt:
         update_cache: yes
-      tags: base
+      when: ansible_os_family == "Debian"
 
+    - name: Install prerequisites for downloads & XFCE + DCV deps
+      apt:
+        name:
+          - wget
+          - curl
+          - ca-certificates
+          - apt-transport-https
+          - gnupg
+          - xfce4
+          - xfce4-terminal
+          - xorg
+          - dbus-x11
+          - policykit-1
+          - pulseaudio
+          - libgl1
+          - libxcb-icccm4
+          - libxcb-image0
+          - libxcb-keysyms1
+          - libxcb-randr0
+          - libxcb-render-util0
+          - libxcb-xinerama0
+        state: present
+        update_cache: yes
+
+    ####################################################################
+    # CloudWatch agent (existing behavior)
+    ####################################################################
     - name: Download CloudWatch Agent package
       get_url:
-        url: "https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb"
+        url: https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
         dest: /tmp/amazon-cloudwatch-agent.deb
-        mode: "0644"
-      tags: cloudwatch
+        mode: '0644'
 
     - name: Install CloudWatch Agent
       apt:
         deb: /tmp/amazon-cloudwatch-agent.deb
         state: present
-      tags: cloudwatch
 
-    - name: Write CloudWatch Agent config
+    - name: Write minimal CloudWatch config
       copy:
         dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
         content: |
@@ -41,183 +65,187 @@
             "metrics": {
               "namespace": "EC2/CWAgent",
               "metrics_collected": {
-                "cpu": { "measurement": ["cpu_usage_idle","cpu_usage_iowait"], "metrics_collection_interval": 60 },
-                "disk": { "measurement": ["used_percent"], "metrics_collection_interval": 60 },
+                "cpu": { "measurement": ["cpu_usage_idle"], "metrics_collection_interval": 60 },
                 "mem": { "measurement": ["mem_used_percent"], "metrics_collection_interval": 60 }
               }
             }
           }
-        mode: "0644"
-      tags: cloudwatch
+        mode: '0644'
 
     - name: Start CloudWatch Agent
       command: >
         /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
         -a fetch-config -m ec2 -s
         -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-      tags: cloudwatch
+      args:
+        warn: false
 
-    ##################################################################
-    # INSTALL EXTRA USER TOOLS (from pipeline payload)
-    ##################################################################
+    ####################################################################
+    # Additional requested tools (from payload)
+    ####################################################################
     - name: Install extra requested tools (if any)
       apt:
         name: "{{ tools_to_install }}"
         state: present
-      when: tools_to_install is defined and tools_to_install | length > 0
-      tags: extras
+      when:
+        - tools_to_install is defined
+        - tools_to_install | length > 0
 
-    ##################################################################
-    # DESKTOP (XFCE) + DCV PRE-REQS
-    ##################################################################
-    - name: Install XFCE minimal desktop
-      apt:
-        name:
-          - xfce4
-          - xfce4-terminal
-          - xorg
-          - dbus-x11
-          - policykit-1
-          - pulseaudio
-        state: present
-        update_cache: yes
-      tags: desktop
-
-    - name: Install DCV dependencies
-      apt:
-        name:
-          - libgl1
-          - libxcb-icccm4
-          - libxcb-image0
-          - libxcb-keysyms1
-          - libxcb-randr0
-          - libxcb-render-util0
-          - libxcb-xinerama0
-          - ca-certificates
-          - wget
-          - apt-transport-https
-          - gnupg
-        state: present
-      tags: dcv-deps
-
-    ##################################################################
-    # DETECT OS + SCRAPE DCV DOWNLOAD PAGE FOR A MATCHING .deb URL
-    ##################################################################
-
-    - name: Determine Ubuntu major.minor short version (eg 22.04)
+    ####################################################################
+    # DCV auto-detect + download + install
+    ####################################################################
+    - name: Determine Ubuntu major.minor (e.g. "22.04" or "20.04")
       set_fact:
-        ubuntu_version_short: "{{ (ansible_distribution_version.split('.')[:2] | join('.')) }}"
-      tags: detect
+        ubuntu_short: "{{ ansible_distribution_version.split('.')[0] ~ '.' ~ ansible_distribution_version.split('.')[1] }}"
 
-    - name: Map Ubuntu short version to DCV directory name (Ubuntu22.04/Ubuntu20.04)
+    - name: Map ubuntu_short -> DCV folder name (Ubuntu22.04 / Ubuntu20.04 / Ubuntu24.04)
       set_fact:
         ubuntu_dcv_dir: >-
-          {% if ubuntu_version_short is version('22.04', '==') %}
-            Ubuntu22.04
-          {% elif ubuntu_version_short is version('20.04', '==') %}
-            Ubuntu20.04
-          {% else %}
-            Ubuntu22.04   # default to 22.04 path (common); adjust if you use different OS
-          {% endif %}
-      tags: detect
+          {{ {
+              '20.04': 'Ubuntu20.04',
+              '22.04': 'Ubuntu22.04',
+              '24.04': 'Ubuntu24.04'
+          }[ubuntu_short] | default('Ubuntu' + ubuntu_short | replace('.', '') ) }}
 
-    - name: Fetch official DCV download page HTML (amazon dcv)
+    - name: Fetch Amazon DCV "latest" HTML page (long-lasting links)
       uri:
-        url: "https://www.amazondcv.com/"
+        url: "{{ dcv_latest_page }}"
         return_content: yes
-        status_code: 200
-      register: dcv_index
-      tags: detect
+      register: dcv_latest_page_raw
 
-    - name: Extract candidate DCV .deb URLs for this Ubuntu dir from page
+    - name: Try extracting a server .deb URL for this Ubuntu dir (Servers/.../x86_64/*.deb)
       set_fact:
-        candidate_urls: >-
-          {{
-            (dcv_index.content
-             | regex_findall('https://d1uj6qtbmh3dt5.cloudfront.net/[^\"\\s]+/Servers/' + ubuntu_dcv_dir + '/x86_64/[^\"\\s]+\\.deb')
-            )
-          }}
-      tags: detect
+        dcv_candidate_urls: >-
+          {{ (dcv_latest_page_raw.content | default(''))  |
+             regex_findall('https?://[^\\\"\\']+/Servers/{{ ubuntu_dcv_dir }}/x86_64/[^\\\"\\']+\\.deb') | unique }}
 
-    - name: Choose the first candidate URL (if any)
+    - name: If no Servers/.../x86_64/.deb found, try any cloudfront .deb mentioning ubuntu version
       set_fact:
-        dcv_download_url: "{{ candidate_urls[0] if (candidate_urls is defined and candidate_urls | length > 0) else '' }}"
-      tags: detect
+        dcv_candidate_urls: >-
+          {{ dcv_candidate_urls if (dcv_candidate_urls | length) > 0 else
+             (dcv_latest_page_raw.content | default('') |
+               regex_findall('https?://[^\\\"\\']+' ~ cloudfront_domain ~ '[^\\\"\\']*ubuntu' ~ (ubuntu_short | replace('.','')) ~ '[^\\\"\\']*\\.deb') | unique) }}
 
-    - name: Fail early with helpful hint if no URL found
-      fail:
-        msg: >
-          Could not find a DCV .deb for {{ ubuntu_dcv_dir }} on the official download page.
-          Candidate URLs length={{ candidate_urls | length | default(0) }}.
-          Check https://www.amazondcv.com/ or set `dcv_download_url` / `dcv_base_domain` manually.
-      when: dcv_download_url == ''
-      tags: detect
+    - name: If still none, attempt generic pattern (nice-dcv-ubuntu<ver>-x86_64.*) (fallback tgz)
+      set_fact:
+        dcv_candidate_urls: >-
+          {{ dcv_candidate_urls if (dcv_candidate_urls | length) > 0 else
+             (dcv_latest_page_raw.content | default('') |
+               regex_findall('https?://[^\\\"\\']+/[^\\\"\\']*nice-dcv[^\\\"\\']*ubuntu' ~ (ubuntu_short | replace('.','')) ~ '[^\\\"\\']*\\.(tgz|tar.gz|deb)') | unique) }}
 
-    - name: Debug — final DCV download URL chosen
+    - name: Debug candidate URLs (first 5)
       debug:
-        msg: "Final DCV URL = {{ dcv_download_url }}"
-      tags: detect
+        var: dcv_candidate_urls[0:5]
 
-    - name: Build local filename from URL
+    - name: Fail early if no candidate URL found
+      fail:
+        msg: |
+          Could not find any Amazon DCV server package URL for Ubuntu {{ ubuntu_short }} on {{ dcv_latest_page }}.
+          The playbook tried to parse the official latest page but found nothing matching Server/Ubuntu{{ ubuntu_short }}.
+          You can set variable dcv_download_url manually to override.
+      when: dcv_candidate_urls is not defined or (dcv_candidate_urls | length) == 0
+
+    - name: Choose first candidate URL
       set_fact:
-        dcv_pkg_name: "{{ (dcv_download_url | regex_search('/([^/]+\\.deb)$', '\\1')) }}"
+        dcv_download_url: "{{ dcv_candidate_urls[0] }}"
+        dcv_pkg_filename: "{{ (dcv_candidate_urls[0] | regex_replace('.*/','')) }}"
 
-    ##################################################################
-    # DOWNLOAD + INSTALL DCV
-    ##################################################################
-    - name: Download DCV server package
+    - name: Debug final chosen URL
+      debug:
+        msg: "Chose DCV URL: {{ dcv_download_url }} (file: {{ dcv_pkg_filename }})"
+
+    - name: Download chosen DCV package to /tmp
       get_url:
         url: "{{ dcv_download_url }}"
-        dest: "/tmp/{{ dcv_pkg_name }}"
+        dest: "/tmp/{{ dcv_pkg_filename }}"
+        mode: "0644"
         timeout: 120
-        validate_certs: yes
-      tags: dcv-install
+      register: dcv_download
+      until: dcv_download is succeeded
+      retries: 2
+      delay: 5
 
-    - name: Install DCV server .deb
+    - name: Ensure downloaded file exists
+      stat:
+        path: "/tmp/{{ dcv_pkg_filename }}"
+      register: dcv_pkg_stat
+
+    - name: Fail if package didn't download
+      fail:
+        msg: "DCV package was not downloaded to /tmp/{{ dcv_pkg_filename }}; URL: {{ dcv_download_url }}"
+      when: not dcv_pkg_stat.stat.exists
+
+    - name: Install DCV package (.deb) if downloaded .deb
       apt:
-        deb: "/tmp/{{ dcv_pkg_name }}"
+        deb: "/tmp/{{ dcv_pkg_filename }}"
         state: present
-      tags: dcv-install
+      when: dcv_pkg_filename.endswith('.deb')
 
-    - name: Ensure dcvserver service enabled & started
+    - name: If package is archive (tgz/tar.gz) - try extract and run installer (best-effort)
+      block:
+        - name: Create temp dir for archive
+          file:
+            path: /tmp/dcv_extract
+            state: directory
+            mode: '0755'
+
+        - name: Extract archive
+          unarchive:
+            src: "/tmp/{{ dcv_pkg_filename }}"
+            dest: /tmp/dcv_extract
+            remote_src: yes
+
+        - name: Run discovered install script (if present) - best-effort
+          shell: |
+            set -e
+            if [ -x /tmp/dcv_extract/install.sh ]; then
+              /tmp/dcv_extract/install.sh || true
+            elif [ -x /tmp/dcv_extract/bin/install.sh ]; then
+              /tmp/dcv_extract/bin/install.sh || true
+            fi
+          args:
+            executable: /bin/bash
+      when: dcv_pkg_filename.endswith('.tgz') or dcv_pkg_filename.endswith('.tar.gz')
+
+    - name: Enable & start DCV server service (if present)
       systemd:
         name: dcvserver
         state: started
         enabled: yes
         daemon_reload: yes
-      tags: dcv-install
+      ignore_errors: yes
 
-    - name: Add ubuntu user to video group
+    - name: Add ubuntu user to video group (helpful for display access)
       user:
         name: ubuntu
         groups: video
         append: yes
-      tags: dcv-install
+      ignore_errors: yes
 
-    - name: Create minimal /etc/dcv/dcv.ini if missing
+    - name: Create minimal DCV config file if missing
       copy:
         dest: /etc/dcv/dcv.ini
         content: |
           [license]
-          # license_file = /etc/dcv/nice-dcv-license.lic
+          # put license_file = /etc/dcv/nice-dcv-license.lic if you have a license
           [ssl]
         owner: root
         group: root
         mode: '0644'
         force: no
-      tags: dcv-install
+      ignore_errors: yes
 
-    - name: Restart dcvserver to pick up config
+    - name: Restart DCV service (best-effort)
       systemd:
         name: dcvserver
         state: restarted
-      tags: dcv-install
+      ignore_errors: yes
 
     - name: Print DCV connection info
       debug:
         msg: |
-          NICE DCV installed & started.
-          Connect with DCV client to: https://{{ ansible_default_ipv4.address }}:8443
-          Ensure your security group allows TCP 8443 (HTTPS) inbound.
-      tags: dcv-install
+          DCV install attempted.
+          Host IP: {{ ansible_default_ipv4.address | default('UNKNOWN') }}
+          If DCV server installed, connect to https://{{ ansible_default_ipv4.address }}:8443
+          Ensure security group allows inbound TCP 8443.
 
