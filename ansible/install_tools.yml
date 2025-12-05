@@ -4,28 +4,19 @@
   become: yes
 
   vars:
-    dcv_version: "2024.2-1"
-    dcv_pkg_name: "nice-dcv-server_{{ dcv_version }}_amd64.ubuntu2204.deb"
-    dcv_download_url: "https://d1uj6qtbmh3dt5.cloudfront.net/{{ dcv_version }}/Servers/Ubuntu22.04/x86_64/{{ dcv_pkg_name }}"
+    dcv_pkg_name: "nice-dcv-server_2024.2.13247-1_amd64.ubuntu2204.deb"
+    dcv_download_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2024.2/Servers/Ubuntu22.04/x86_64/{{ dcv_pkg_name }}"
 
   tasks:
 
-    # ---------------------------------------------------------
-    # BASE UPDATE
-    # ---------------------------------------------------------
     - name: Update apt cache
       apt:
         update_cache: yes
-      when: ansible_os_family == "Debian"
 
-    # ---------------------------------------------------------
-    # CLOUDWATCH AGENT
-    # ---------------------------------------------------------
     - name: Download CloudWatch Agent
       get_url:
         url: https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
         dest: /tmp/amazon-cloudwatch-agent.deb
-        mode: '0644'
 
     - name: Install CloudWatch Agent
       apt:
@@ -36,29 +27,21 @@
       template:
         src: amazon-cloudwatch-agent.j2
         dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-        mode: '0644'
 
     - name: Start CloudWatch Agent
       command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
-    # ---------------------------------------------------------
-    # INSTALL CUSTOM TOOLS
-    # ---------------------------------------------------------
-    - name: Install requested tools
+    - name: Install tools
       apt:
         name: "{{ tools_to_install }}"
         state: present
-      when: tools_to_install is defined and tools_to_install | length > 0
+      when: tools_to_install is defined
 
-
-    # ---------------------------------------------------------
-    # DESKTOP (XFCE)
-    # ---------------------------------------------------------
-    - name: Install XFCE minimal desktop
+    # -------- XFCE ----------
+    - name: Install XFCE
       apt:
         name:
           - xfce4
-          - xfce4-terminal
           - xorg
           - dbus-x11
           - policykit-1
@@ -66,11 +49,7 @@
         state: present
         update_cache: yes
 
-
-    # ---------------------------------------------------------
-    # NICE DCV INSTALLATION
-    # ---------------------------------------------------------
-
+    # -------- DCV DEPENDENCIES ----------
     - name: Install DCV dependencies
       apt:
         name:
@@ -85,20 +64,19 @@
           - wget
         state: present
 
+    # -------- DCV PACKAGE ----------
     - name: Download DCV package
       get_url:
         url: "{{ dcv_download_url }}"
         dest: "/tmp/{{ dcv_pkg_name }}"
         mode: '0644'
-      register: dcv_download
-      failed_when: dcv_download.status != 200
 
     - name: Install DCV
       apt:
         deb: "/tmp/{{ dcv_pkg_name }}"
         state: present
 
-    - name: Enable & start DCV server
+    - name: Enable DCV server
       systemd:
         name: dcvserver
         enabled: yes
@@ -114,15 +92,8 @@
       copy:
         dest: /etc/dcv/dcv.ini
         content: |
-          [license]
-          # Leave empty for evaluation mode
-
           [session-management]
-          create-session = true
-
-        owner: root
-        group: root
-        mode: '0644'
+          create-session=true
 
     - name: Restart DCV server
       systemd:
@@ -131,8 +102,5 @@
 
     - name: Print DCV connection URL
       debug:
-        msg: |
-          NICE DCV is now running!
-          Connect via:
-          https://{{ ansible_default_ipv4.address }}:8443
+        msg: "DCV ready at https://{{ ansible_default_ipv4.address }}:8443"
 
