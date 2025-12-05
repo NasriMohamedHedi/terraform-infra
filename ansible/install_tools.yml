@@ -1,22 +1,22 @@
-# ansible/install_tools.yml
-- name: Install tools + CloudWatch Agent + NICE DCV + XFCE
+---
+- name: Install tools + CloudWatch Agent + DCV + XFCE (auto version)
   hosts: all
   become: yes
 
-  vars:
-    dcv_pkg_name: "nice-dcv-server_2024.2.13247-1_amd64.ubuntu2204.deb"
-    dcv_download_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2024.2/Servers/Ubuntu22.04/x86_64/{{ dcv_pkg_name }}"
-
   tasks:
 
+    ##################################################################
+    # BASE SYSTEM + CLOUDWATCH AGENT
+    ##################################################################
     - name: Update apt cache
       apt:
         update_cache: yes
 
-    - name: Download CloudWatch Agent
+    - name: Install CloudWatch Agent - download
       get_url:
         url: https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
         dest: /tmp/amazon-cloudwatch-agent.deb
+        mode: "0644"
 
     - name: Install CloudWatch Agent
       apt:
@@ -24,32 +24,55 @@
         state: present
 
     - name: Configure CloudWatch Agent
-      template:
-        src: amazon-cloudwatch-agent.j2
+      copy:
         dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+        content: |
+          {
+            "agent": {
+              "metrics_collection_interval": 60,
+              "run_as_user": "root"
+            },
+            "metrics": {
+              "namespace": "EC2/CWAgent",
+              "metrics_collected": {
+                "cpu": { "measurement": ["cpu_usage_idle", "cpu_usage_iowait"], "metrics_collection_interval": 60 },
+                "disk": { "measurement": ["used_percent"], "metrics_collection_interval": 60 },
+                "mem": { "measurement": ["mem_used_percent"], "metrics_collection_interval": 60 }
+              }
+            }
+          }
+        mode: "0644"
 
     - name: Start CloudWatch Agent
-      command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+      command: >
+        /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+        -a fetch-config -m ec2 -s
+        -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
-    - name: Install tools
+    ##################################################################
+    # INSTALL EXTRA TOOLS IF PROVIDED
+    ##################################################################
+    - name: Install extra requested tools
       apt:
         name: "{{ tools_to_install }}"
         state: present
       when: tools_to_install is defined
 
-    # -------- XFCE ----------
+    ##################################################################
+    # DESKTOP (XFCE)
+    ##################################################################
     - name: Install XFCE
       apt:
         name:
           - xfce4
+          - xfce4-terminal
           - xorg
           - dbus-x11
           - policykit-1
-          - lightdm
+          - pulseaudio
         state: present
         update_cache: yes
 
-    # -------- DCV DEPENDENCIES ----------
     - name: Install DCV dependencies
       apt:
         name:
@@ -62,25 +85,67 @@
           - libxcb-xinerama0
           - ca-certificates
           - wget
+          - apt-transport-https
+          - gnupg
         state: present
 
-    # -------- DCV PACKAGE ----------
-    - name: Download DCV package
+    ##################################################################
+    # DETECT LATEST DCV VERSION + CORRECT UBUNTU PATH
+    ##################################################################
+
+    - name: Determine Ubuntu major.minor version (22.04 or 20.04)
+      set_fact:
+        ubuntu_version_short: "{{ ansible_distribution_version.split('.')[0] }}.{{ ansible_distribution_version.split('.')[1] }}"
+
+    - name: Resolve DCV directory based on Ubuntu version
+      set_fact:
+        ubuntu_dcv_dir: "{{ 'Ubuntu' + ubuntu_version_short }}"
+      when: ubuntu_version_short in ['22.04','20.04']
+
+    - name: Fetch DCV download index page
+      uri:
+        url: https://d1uj6qtbmh3dt5.cloudfront.net/
+        return_content: yes
+      register: dcv_index
+
+    - name: Detect latest DCV version dynamically
+      set_fact:
+        latest_dcv_version: "{{ dcv_index.content | regex_search('(202[0-9]\\.[0-9]+)', '\\1') }}"
+
+    - name: Build DCV package filename
+      set_fact:
+        dcv_pkg: "nice-dcv-server_{{ latest_dcv_version }}_amd64.ubuntu{{ ubuntu_version_short|replace('.','') }}.deb"
+
+    - name: Build final DCV URL
+      set_fact:
+        dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/{{ latest_dcv_version }}/Servers/{{ ubuntu_dcv_dir }}/x86_64/{{ dcv_pkg }}"
+
+    - name: Debug DCV download URL
+      debug:
+        msg: "Final DCV URL = {{ dcv_url }}"
+
+    ##################################################################
+    # DOWNLOAD + INSTALL DCV
+    ##################################################################
+
+    - name: Download DCV server package
       get_url:
-        url: "{{ dcv_download_url }}"
-        dest: "/tmp/{{ dcv_pkg_name }}"
-        mode: '0644'
+        url: "{{ dcv_url }}"
+        dest: "/tmp/{{ dcv_pkg }}"
+        timeout: 60
+        validate_certs: yes
 
-    - name: Install DCV
+    - name: Install DCV server
       apt:
-        deb: "/tmp/{{ dcv_pkg_name }}"
+        deb: "/tmp/{{ dcv_pkg }}"
         state: present
 
-    - name: Enable DCV server
+    - name: Enable and start DCV service
       systemd:
         name: dcvserver
-        enabled: yes
         state: started
+        enabled: yes
+        daemon_reload: yes
 
     - name: Add ubuntu user to video group
       user:
@@ -88,19 +153,23 @@
         groups: video
         append: yes
 
-    - name: Create default dcv.ini
+    - name: Create minimal DCV config if missing
       copy:
         dest: /etc/dcv/dcv.ini
         content: |
-          [session-management]
-          create-session=true
+          [license]
+          [ssl]
+        mode: "0644"
+        force: no
 
-    - name: Restart DCV server
+    - name: Restart DCV service
       systemd:
         name: dcvserver
         state: restarted
 
-    - name: Print DCV connection URL
+    - name: Print connection info
       debug:
-        msg: "DCV ready at https://{{ ansible_default_ipv4.address }}:8443"
+        msg: |
+          DCV installed.
+          Connect via: https://{{ ansible_default_ipv4.address }}:8443
 
