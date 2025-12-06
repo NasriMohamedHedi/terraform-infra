@@ -1,132 +1,286 @@
 ---
-- name: Install tools + CloudWatch Agent + Amazon DCV Server
+- name: Install XFCE desktop + Amazon DCV Server (robust auto-download) 
   hosts: all
   become: yes
-
   vars:
+    # optional override (if auto-detect fails set this to a direct .deb URL)
+    dcv_download_url: ""
+    # set true to attempt NVIDIA driver install when an NVIDIA GPU is present
+    enable_nvidia: false
+    # extra apt packages you want installed for tools (pass via --extra-vars)
     tools_to_install: []
+    # DCV listen port (usually 8443)
+    dcv_port: 8443
 
   tasks:
 
-    - name: Gathering facts
-      setup:
+  - name: Gather facts
+    setup:
 
-    - name: Show detected OS
-      debug:
-        msg: "Detected {{ ansible_distribution }} {{ ansible_distribution_version }}"
+  - name: Show detected OS
+    debug:
+      msg: "Detected {{ ansible_distribution }} {{ ansible_distribution_version }} (family={{ ansible_os_family }})"
 
-    - name: Update apt cache
-      apt:
-        update_cache: yes
+  - name: Ensure apt cache is updated
+    apt:
+      update_cache: yes
+      cache_valid_time: 3600
 
-    - name: Install dependencies
-      apt:
-        name:
-          - curl
-          - jq
-          - wget
-        state: present
+  - name: Install base packages required (curl, jq, unzip, python3, etc.)
+    apt:
+      name:
+        - curl
+        - jq
+        - wget
+        - ca-certificates
+        - apt-transport-https
+        - lsb-release
+        - gnupg
+        - unzip
+      state: present
 
-    # -----------------------------------------------------
-    # Build ubuntu token like ubuntu2004, ubuntu2204, ubuntu2404
-    # -----------------------------------------------------
-    - name: Build ubuntu token
-      set_fact:
-        ubuntu_token: "ubuntu{{ ansible_distribution_major_version }}{{ ansible_distribution_minor_version | default('04') }}"
+  ########################################
+  # Optional NVIDIA driver installation
+  ########################################
+  - name: Detect if NVIDIA GPU present
+    shell: "lspci | grep -i nvidia || true"
+    register: lspci_nvidia
+    changed_when: false
 
-    - name: Debug ubuntu token
-      debug:
-        msg: "ubuntu_token = {{ ubuntu_token }}"
+  - name: Set nvidia_present fact
+    set_fact:
+      nvidia_present: "{{ (lspci_nvidia.stdout | length) > 0 }}"
 
-    # -----------------------------------------------------
-    # DYNAMIC DCV DETECTOR (NEVER FAILS)
-    # -----------------------------------------------------
-    - name: Detect DCV URL dynamically (latest version)
-      shell: |
-        #!/bin/sh
+  - name: Debug NVIDIA presence
+    debug:
+      msg: "NVIDIA present = {{ nvidia_present }} (enable_nvidia={{ enable_nvidia }})"
 
-        OUT=""
+  - name: Install ubuntu-drivers-common (for NVIDIA autoprobe) (Debian family only)
+    apt:
+      name: ubuntu-drivers-common
+      state: present
+    when:
+      - ansible_os_family == "Debian"
+      - enable_nvidia | default(false)
 
-        # 1) fetch CloudFront root listing
-        root=$(curl -fsS -m 20 https://d1uj6qtbmh3dt5.cloudfront.net/ 2>/dev/null)
+  - name: Autoinstall NVIDIA drivers (if enabled and GPU present) - may require reboot
+    shell: >
+      ubuntu-drivers --verbose autoinstall
+    args:
+      warn: false
+    when:
+      - enable_nvidia | default(false)
+      - nvidia_present
+    register: nvidia_install
+    changed_when: "'installed' in (nvidia_install.stdout | default('')) or nvidia_install.rc == 0"
 
-        # 2) get available version directories
-        echo "$root" | grep -Eo '[0-9]{4}\.[0-9]+' | sort -V > /tmp/dcv_versions.txt
+  ########################################
+  # Desktop environment (XFCE)
+  ########################################
+  - name: Install XFCE minimal desktop and X server
+    apt:
+      name:
+        - xfce4
+        - xfce4-terminal
+        - xorg
+        - dbus-x11
+        - policykit-1
+        - pulseaudio
+        - fonts-dejavu-core
+      state: present
+      update_cache: yes
 
-        last_version=$(tail -n1 /tmp/dcv_versions.txt)
+  - name: Install DCV runtime dependencies
+    apt:
+      name:
+        - libgl1
+        - libxcb-icccm4
+        - libxcb-image0
+        - libxcb-keysyms1
+        - libxcb-randr0
+        - libxcb-render-util0
+        - libxcb-xinerama0
+      state: present
 
-        if [ -z "$last_version" ]; then
-          echo ""
-          exit 1
+  ########################################
+  # Detect OS token and form ubuntu token (ubuntu2004 / ubuntu2204 / ubuntu2404)
+  ########################################
+  - name: Build ubuntu token (example: ubuntu2004)
+    set_fact:
+      ubuntu_token: "ubuntu{{ ansible_distribution_major_version }}{{ (ansible_distribution_version.split('.')[1] | default('04')) }}"
+
+  - name: Debug ubuntu token
+    debug:
+      msg: "ubuntu_token = {{ ubuntu_token }}"
+
+  ########################################
+  # DCV download URL detection (robust)
+  # 1) If dcv_download_url var provided -> use it
+  # 2) Scrape amazondcv.com for direct .deb links (preferred long-lived links)
+  # 3) Fallback to CloudFront version listing attempt
+  ########################################
+  - name: Detect DCV download URL (try provided override first)
+    set_fact:
+      DCV_DOWNLOAD_URL: "{{ dcv_download_url | trim }}"
+    when: dcv_download_url | length > 0
+
+  - name: Try to discover DCV URL on amazondcv.com (long-lived links)
+    shell: |
+      set -e
+      DOMAIN="https://www.amazondcv.com"
+      PAGE=$(curl -fsS -m 20 "$DOMAIN/" || true)
+      echo "$PAGE" | grep -Eo 'https?://[^"]*nice-dcv-server[^"]*\.deb' > /tmp/amazondcv_links.txt || true
+      # prefer URLs matching ubuntu token
+      token="{{ ubuntu_token }}"
+      if [ -s /tmp/amazondcv_links.txt ]; then
+        pick=$(grep -i "$token" /tmp/amazondcv_links.txt | head -n1 || true)
+        if [ -n "$pick" ]; then
+          echo "$pick"
+          exit 0
         fi
+        # fallback to first .deb found
+        head -n1 /tmp/amazondcv_links.txt
+        exit 0
+      fi
+      echo ""
+    register: amazondcv_links
+    changed_when: false
+    when: DCV_DOWNLOAD_URL is not defined or DCV_DOWNLOAD_URL == ""
 
-        # 3) get Servers/ listing
-        srv=$(curl -fsS -m 20 https://d1uj6qtbmh3dt5.cloudfront.net/$last_version/Servers/ 2>/dev/null)
+  - name: Use amazondcv.com detected URL if present
+    set_fact:
+      DCV_DOWNLOAD_URL: "{{ amazondcv_links.stdout | trim }}"
+    when:
+      - (amazondcv_links is defined)
+      - (amazondcv_links.stdout | length) > 0
+      - (DCV_DOWNLOAD_URL is not defined or DCV_DOWNLOAD_URL == "")
 
-        # Normalize ubuntu token: ubuntu2004 -> Ubuntu2004
-        UB=$(printf '%s\n' "{{ ubuntu_token }}" | sed 's/ubuntu/Ubuntu/')
+  - name: Fallback: try CloudFront latest-version probing
+    shell: |
+      set -eu
+      ROOT=$(curl -fsS -m 20 https://d1uj6qtbmh3dt5.cloudfront.net/ || true)
+      latest=$(echo "$ROOT" | grep -Eo '[0-9]{4}\.[0-9]+' | sort -V | tail -n1 || true)
+      if [ -z "$latest" ]; then
+        echo ""
+        exit 0
+      fi
+      UB_FOLDER=$(printf 'Ubuntu%s' "{{ ansible_distribution_version.split('.')[0] }}{{ ansible_distribution_version.split('.')[1] }}")
+      # attempt to list ubuntu folder x86_64 directory and find .deb
+      LISTING=$(curl -fsS -m 20 "https://d1uj6qtbmh3dt5.cloudfront.net/$latest/Servers/$UB_FOLDER/x86_64/" || true)
+      DEB=$(echo "$LISTING" | grep -Eo 'nice-dcv-server[^"]*\.deb' | head -n1 || true)
+      if [ -n "$DEB" ]; then
+        echo "https://d1uj6qtbmh3dt5.cloudfront.net/$latest/Servers/$UB_FOLDER/x86_64/$DEB"
+        exit 0
+      fi
+      echo ""
+    register: cloudfront_fallback
+    changed_when: false
+    when: DCV_DOWNLOAD_URL is not defined or DCV_DOWNLOAD_URL == ""
 
-        echo "$srv" | grep -Eo "$UB" > /tmp/dcv_ubuntu_folder.txt
+  - name: Use cloudfront fallback if present
+    set_fact:
+      DCV_DOWNLOAD_URL: "{{ cloudfront_fallback.stdout | trim }}"
+    when:
+      - (cloudfront_fallback is defined)
+      - (cloudfront_fallback.stdout | length) > 0
+      - (DCV_DOWNLOAD_URL is not defined or DCV_DOWNLOAD_URL == "")
 
-        ubuntu_folder=$(head -n1 /tmp/dcv_ubuntu_folder.txt)
+  - name: Fail if DCV URL detection failed (give actionable hint)
+    fail:
+      msg: >-
+        Could not automatically determine Amazon DCV .deb URL.
+        Either:
+          * provide a direct URL via the 'dcv_download_url' variable (recommended),
+          * or ensure the instance has outbound internet access and the amazondcv.com site is reachable.
+        Example override:
+          ansible-playbook ... --extra-vars "dcv_download_url='https://www.amazondcv.com/long-lived-link/nice-dcv-server_xxx.deb'"
+    when: DCV_DOWNLOAD_URL is not defined or (DCV_DOWNLOAD_URL | length) == 0
 
-        if [ -z "$ubuntu_folder" ]; then
-          echo ""
-          exit 1
-        fi
+  - name: Show final DCV URL
+    debug:
+      msg: "Using DCV URL = {{ DCV_DOWNLOAD_URL }}"
 
-        # 4) get architecture folder
-        arch=$(curl -fsS -m 20 https://d1uj6qtbmh3dt5.cloudfront.net/$last_version/Servers/$ubuntu_folder/x86_64/ 2>/dev/null)
+  ########################################
+  # Download & install DCV
+  ########################################
+  - name: Download DCV package
+    get_url:
+      url: "{{ DCV_DOWNLOAD_URL }}"
+      dest: /tmp/dcv.deb
+      mode: '0644'
+      validate_certs: yes
+    register: download_result
+    until: download_result is succeeded
+    retries: 2
+    delay: 5
 
-        echo "$arch" | grep -Eo 'nice-dcv-server[^"]+\.deb' > /tmp/dcv_debs.txt
+  - name: Install DCV server package (deb)
+    apt:
+      deb: /tmp/dcv.deb
+      state: present
 
-        deb=$(head -n1 /tmp/dcv_debs.txt)
+  - name: Ensure dcvserver enabled and started
+    systemd:
+      name: dcvserver
+      enabled: yes
+      state: started
+      daemon_reload: yes
 
-        if [ -z "$deb" ]; then
-          echo ""
-          exit 1
-        fi
+  - name: Create minimal DCV config if missing
+    copy:
+      dest: /etc/dcv/dcv.ini
+      content: |
+        [license]
+        # place license file path here if you have one
+        # license_file = /etc/dcv/nice-dcv-license.lic
 
-        # 5) final URL
-        echo "https://d1uj6qtbmh3dt5.cloudfront.net/$last_version/Servers/$ubuntu_folder/x86_64/$deb"
+        [ssl]
+        # Use DCV's default cert or set your cert/key
+        # key = /etc/dcv/keys/server.key
+        # cert = /etc/dcv/keys/server.crt
+    owner: root
+    group: root
+    mode: '0644'
+    force: no
 
-      register: dcv_url_raw
+  - name: Add ubuntu user to video group (helps with graphical acceleration)
+    user:
+      name: ubuntu
+      groups: video
+      append: yes
+    when: "'ubuntu' in ansible_facts['passwd']"
 
-    - name: Clean DCV URL
-      set_fact:
-        DCV_DOWNLOAD_URL: "{{ dcv_url_raw.stdout | trim }}"
+  - name: Allow DCV port via ufw if ufw exists (optional)
+    block:
+      - name: Ensure ufw is installed
+        apt:
+          name: ufw
+          state: present
 
-    - name: Show final URL
-      debug:
-        msg: "DCV_DOWNLOAD_URL = {{ DCV_DOWNLOAD_URL }}"
+      - name: Allow 8443/tcp for DCV
+        ufw:
+          rule: allow
+          port: "{{ dcv_port }}"
+          proto: tcp
+    rescue:
+      - debug:
+          msg: "ufw not configured or not available; ensure your AWS Security Group allows port {{ dcv_port }}"
 
-    - name: Fail if URL empty
-      fail:
-        msg: "DCV URL detection failed!"
-      when: DCV_DOWNLOAD_URL | length == 0
+  - name: Restart dcvserver to pick up config
+    systemd:
+      name: dcvserver
+      state: restarted
 
-    # -----------------------------------------------------
-    # Download DCV
-    # -----------------------------------------------------
-    - name: Download DCV installer
-      get_url:
-        url: "{{ DCV_DOWNLOAD_URL }}"
-        dest: /tmp/dcv.deb
-        mode: '0644'
-      register: dcv_download
+  - name: Install extra requested tools
+    apt:
+      name: "{{ tools_to_install }}"
+      state: present
+    when: tools_to_install | length > 0
 
-    - name: Install DCV
-      apt:
-        deb: /tmp/dcv.deb
-      when: dcv_download is succeeded
-
-    # -----------------------------------------------------
-    # Install optional tools (from Jenkins JSON)
-    # -----------------------------------------------------
-    - name: Install tools defined in pipeline
-      apt:
-        name: "{{ item }}"
-        state: present
-      loop: "{{ tools_to_install }}"
-      when: tools_to_install | length > 0
+  - name: Print DCV connection info
+    debug:
+      msg: |
+        Amazon DCV installed and running.
+        Connect using DCV client to: https://{{ ansible_default_ipv4.address }}:{{ dcv_port }}
+        Make sure AWS Security Group allows inbound {{ dcv_port }}/TCP.
 
