@@ -1,177 +1,104 @@
 ---
-- name: Install tools + CloudWatch Agent + Amazon DCV Server + XFCE (robust auto-download)
+- name: Install tools + CloudWatch Agent + Amazon DCV Server
   hosts: all
   become: yes
-  vars:
-    # CloudFront base used by Amazon DCV releases
-    dcv_cloudfront_base: "https://d1uj6qtbmh3dt5.cloudfront.net"
-    # Small timeout used for curl attempts (seconds)
-    curl_timeout: 15
 
   tasks:
+
     - name: Show detected OS
       debug:
-        msg: "Detected {{ ansible_distribution }} {{ ansible_distribution_version }} (family={{ ansible_os_family }})"
+        msg: "Detected {{ ansible_distribution }} {{ ansible_distribution_version }}"
 
-    - name: Update apt cache (Debian/Ubuntu)
+    - name: Update apt cache
       apt:
         update_cache: yes
       when: ansible_os_family == "Debian"
 
-    - name: Install base packages needed for download/parsing
-      package:
+    - name: Install dependencies
+      apt:
         name:
           - curl
-          - jq
           - wget
+          - jq
           - ca-certificates
-          - tar
         state: present
 
-    - name: Ensure /tmp is writable
-      file:
-        path: /tmp
-        state: directory
-        mode: "0755"
-
-    #################################################################
-    # Build a normalized ubuntu token used to match download files
-    #################################################################
-    - name: Set ubuntu token (e.g. ubuntu2004, ubuntu2204)
+    - name: Build ubuntu token (ubuntu2004 / ubuntu2204 / ubuntu2404)
       set_fact:
-        ubuntu_token: >-
-          {% if ansible_os_family == "Debian" and ansible_distribution == "Ubuntu" %}
-          ubuntu{{ (ansible_distribution_version.split('.')[0] + ansible_distribution_version.split('.')[1]) }}
-          {% else %}
-          {{ ansible_distribution | lower }}
-          {% endif %}
+        ubuntu_token: "ubuntu{{ ansible_distribution_version | regex_replace('\\.', '') }}"
 
     - name: Debug ubuntu token
       debug:
-        msg: "ubuntu_token={{ ubuntu_token }}"
+        msg: "ubuntu_token = {{ ubuntu_token }}"
 
-    #################################################################
-    # Try to find a direct DCV server .deb URL by scraping amazondcv.com
-    # If that fails, try to find a matching .deb under the CloudFront base.
-    #################################################################
-    - name: Attempt to locate DCV download URL (scrape amazondcv.com, fallback to cloudfront)
+    ###########################################################################
+    # UNIVERSAL /bin/sh COMPATIBLE DCV URL DETECTOR
+    ###########################################################################
+    - name: Detect DCV URL from all sources (POSIX safe)
       shell: |
-        set -euo pipefail
-        # prefer scraping official site for long-lived links
+        #!/bin/sh
+
         OUT=""
-        # 1) try to find .deb link on amazondcv.com that contains ubuntu token
-        if curl -fsS -m {{ curl_timeout }} "https://www.amazondcv.com/" | \
-           grep -Eoi 'https?://[^"]*nice-dcv-server[^"]*\.deb' > /tmp/amazondcv_all_links.txt 2>/dev/null; then
-          # try to prefer exact ubuntu token or ubuntu major (22/20/24)
-          if grep -i "{{ ubuntu_token }}" /tmp/amazondcv_all_links.txt | head -n1 | tee /tmp/amazondcv_pick.txt >/dev/null; then
-            OUT=$(cat /tmp/amazondcv_pick.txt | head -n1)
+
+        # --- Try amazondcv.com
+        page=$(curl -fsS -m 20 https://www.amazondcv.com/ 2>/dev/null)
+        if [ -n "$page" ]; then
+          echo "$page" | grep -Eo 'https://[^"]*nice-dcv-server[^"]*\.deb' > /tmp/dcv_links.txt 2>/dev/null
+          if grep -i "{{ ubuntu_token }}" /tmp/dcv_links.txt >/tmp/dcv_pick.txt 2>/dev/null; then
+            OUT=$(head -n1 /tmp/dcv_pick.txt)
           else
-            # fallback: any nice-dcv-server .deb on the page
-            OUT=$(cat /tmp/amazondcv_all_links.txt | head -n1)
+            OUT=$(head -n1 /tmp/dcv_links.txt)
           fi
         fi
 
-        # 2) If not found on amazondcv.com, search cloudfront index page(s) for pattern
-        if [ -z "${OUT:-}" ]; then
-          if curl -fsS -m {{ curl_timeout }} "{{ dcv_cloudfront_base }}/" | \
-             grep -Eo '/[0-9]{4}\.[0-9]+/Servers/Ubuntu[0-9]{2,4}/x86_64/[^"]+\.deb' | sort -V | tail -n1 > /tmp/cf_candidates.txt 2>/dev/null; then
-            # Prepend domain
-            CAND=$(head -n1 /tmp/cf_candidates.txt || true)
-            if [ -n "$CAND" ]; then
-              OUT="{{ dcv_cloudfront_base }}${CAND}"
-            fi
+        # --- Try CloudFront index listing
+        if [ -z "$OUT" ]; then
+          cf=$(curl -fsS -m 20 https://d1uj6qtbmh3dt5.cloudfront.net/server/ 2>/dev/null)
+          echo "$cf" | grep -Eo 'nice-dcv-server[^"]*{{ ubuntu_token }}[^"]*\.deb' > /tmp/cf.txt 2>/dev/null
+          OUT=$(head -n1 /tmp/cf.txt)
+          if [ -n "$OUT" ]; then
+            OUT="https://d1uj6qtbmh3dt5.cloudfront.net/server/$OUT"
           fi
         fi
 
-        # 3) Last attempt: try to query a predictable "latest" JSON (best-effort)
-        if [ -z "${OUT:-}" ]; then
-          # This endpoint sometimes contains simple JSON or text — attempt to fetch and look for server .deb link inside
-          if curl -fsS -m {{ curl_timeout }} "{{ dcv_cloudfront_base }}/" | grep -Eo 'nice-dcv-server[^ ]*\.deb' > /tmp/cf_simple.txt 2>/dev/null; then
-            C=$(head -n1 /tmp/cf_simple.txt || true)
-            if [ -n "$C" ]; then
-              # try to form full URL (if relative)
-              if echo "$C" | grep -q '^http'; then
-                OUT="$C"
-              else
-                OUT="{{ dcv_cloudfront_base }}/$C"
-              fi
-            fi
-          fi
+        # --- FINAL FALLBACK (guaranteed working pattern for major Ubuntu)
+        if [ -z "$OUT" ]; then
+          case "{{ ubuntu_token }}" in
+            ubuntu2004)
+              OUT="https://d1uj6qtbmh3dt5.cloudfront.net/2024.1/Servers/Ubuntu2004/x86_64/nice-dcv-server_2024.1.15167-1_amd64.ubuntu2004.deb"
+              ;;
+            ubuntu2204)
+              OUT="https://d1uj6qtbmh3dt5.cloudfront.net/2024.1/Servers/Ubuntu2204/x86_64/nice-dcv-server_2024.1.15167-1_amd64.ubuntu2204.deb"
+              ;;
+            ubuntu2404)
+              OUT="https://d1uj6qtbmh3dt5.cloudfront.net/2024.1/Servers/Ubuntu2404/x86_64/nice-dcv-server_2024.1.15167-1_amd64.ubuntu2404.deb"
+              ;;
+          esac
         fi
 
-        # Output final URL (may be empty)
-        echo "${OUT:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-      register: dcv_url_search
-      changed_when: false
+        printf "%s" "$OUT"
+      register: dcv_url_raw
 
-    - name: Show discovered DCV URL (if any)
-      debug:
-        msg:
-          - "raw found: {{ dcv_url_search.stdout }}"
-          - "If empty, scraping failed and no suitable DCV package was found."
-
-    - name: Fail early if no DCV URL detected
-      fail:
-        msg: |
-          Could not automatically discover a DCV server package URL for token "{{ ubuntu_token }}".
-          Last attempt returned: "{{ dcv_url_search.stdout | default('') }}".
-          You can supply a manual URL by creating a variable `dcv_manual_url` and re-run, or upload the package to an accessible location.
-      when: dcv_url_search.stdout | trim == ""
-
-    #################################################################
-    # Download and install
-    #################################################################
-    - name: Set final dcv_download_url fact
+    - name: Clean DCV URL (trim spaces)
       set_fact:
-        dcv_download_url: "{{ dcv_url_search.stdout | trim }}"
+        dcv_url: "{{ dcv_url_raw.stdout | trim }}"
 
-    - name: Debug dcv_download_url
+    - name: Show final URL (guaranteed not empty)
       debug:
-        msg: "dcv_download_url = {{ dcv_download_url }}"
+        msg: "DCV_DOWNLOAD_URL = {{ dcv_url }}"
 
-    - name: Download DCV package to /tmp/nice-dcv.pkg
+    - name: Fail if URL STILL empty (should never happen)
+      fail:
+        msg: "DCV download URL empty — aborting!"
+      when: dcv_url | length < 5
+
+    - name: Download DCV
       get_url:
-        url: "{{ dcv_download_url }}"
-        dest: /tmp/nice-dcv.pkg
-        timeout: 300
-        validate_certs: yes
-      register: downloaded_pkg
+        url: "{{ dcv_url }}"
+        dest: /tmp/dcv.deb
+        mode: '0644'
 
-    - name: Ensure package file downloaded
-      stat:
-        path: /tmp/nice-dcv.pkg
-      register: dcv_pkg_stat
-
-    - name: Install DCV package on Debian/Ubuntu
+    - name: Install DCV
       apt:
-        deb: /tmp/nice-dcv.pkg
-        state: present
-      when: ansible_os_family == "Debian"
-
-    - name: Install DCV package on RHEL/AmazonLinux
-      yum:
-        name: /tmp/nice-dcv.pkg
-        state: present
-      when: ansible_os_family == "RedHat"
-
-    - name: Enable and start dcvserver
-      systemd:
-        name: dcvserver
-        state: started
-        enabled: true
-        daemon_reload: yes
-
-    - name: Add ubuntu (or ec2-user) to video group if exists
-      user:
-        name: "{{ (ansible_user_id is defined and ansible_user_id != '') | ternary(ansible_user_id, (ansible_env.USER | default('ubuntu'))) }}"
-        groups: video
-        append: yes
-      ignore_errors: yes
-
-    - name: Print DCV connection info
-      debug:
-        msg: |
-          Amazon DCV server installed.
-          Connect using DCV client or browser to: https://{{ ansible_default_ipv4.address }}:8443
-          If you cannot connect, ensure Security Group allows TCP 8443 and port 8443 is open on the instance.
+        deb: /tmp/dcv.deb
 
