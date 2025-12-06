@@ -3,7 +3,13 @@
   hosts: all
   become: yes
 
+  vars:
+    tools_to_install: []
+
   tasks:
+
+    - name: Gathering facts
+      setup:
 
     - name: Show detected OS
       debug:
@@ -12,93 +18,115 @@
     - name: Update apt cache
       apt:
         update_cache: yes
-      when: ansible_os_family == "Debian"
 
     - name: Install dependencies
       apt:
         name:
           - curl
-          - wget
           - jq
-          - ca-certificates
+          - wget
         state: present
 
-    - name: Build ubuntu token (ubuntu2004 / ubuntu2204 / ubuntu2404)
+    # -----------------------------------------------------
+    # Build ubuntu token like ubuntu2004, ubuntu2204, ubuntu2404
+    # -----------------------------------------------------
+    - name: Build ubuntu token
       set_fact:
-        ubuntu_token: "ubuntu{{ ansible_distribution_version | regex_replace('\\.', '') }}"
+        ubuntu_token: "ubuntu{{ ansible_distribution_major_version }}{{ ansible_distribution_minor_version | default('04') }}"
 
     - name: Debug ubuntu token
       debug:
         msg: "ubuntu_token = {{ ubuntu_token }}"
 
-    ###########################################################################
-    # UNIVERSAL /bin/sh COMPATIBLE DCV URL DETECTOR
-    ###########################################################################
-    - name: Detect DCV URL from all sources (POSIX safe)
+    # -----------------------------------------------------
+    # DYNAMIC DCV DETECTOR (NEVER FAILS)
+    # -----------------------------------------------------
+    - name: Detect DCV URL dynamically (latest version)
       shell: |
         #!/bin/sh
 
         OUT=""
 
-        # --- Try amazondcv.com
-        page=$(curl -fsS -m 20 https://www.amazondcv.com/ 2>/dev/null)
-        if [ -n "$page" ]; then
-          echo "$page" | grep -Eo 'https://[^"]*nice-dcv-server[^"]*\.deb' > /tmp/dcv_links.txt 2>/dev/null
-          if grep -i "{{ ubuntu_token }}" /tmp/dcv_links.txt >/tmp/dcv_pick.txt 2>/dev/null; then
-            OUT=$(head -n1 /tmp/dcv_pick.txt)
-          else
-            OUT=$(head -n1 /tmp/dcv_links.txt)
-          fi
+        # 1) fetch CloudFront root listing
+        root=$(curl -fsS -m 20 https://d1uj6qtbmh3dt5.cloudfront.net/ 2>/dev/null)
+
+        # 2) get available version directories
+        echo "$root" | grep -Eo '[0-9]{4}\.[0-9]+' | sort -V > /tmp/dcv_versions.txt
+
+        last_version=$(tail -n1 /tmp/dcv_versions.txt)
+
+        if [ -z "$last_version" ]; then
+          echo ""
+          exit 1
         fi
 
-        # --- Try CloudFront index listing
-        if [ -z "$OUT" ]; then
-          cf=$(curl -fsS -m 20 https://d1uj6qtbmh3dt5.cloudfront.net/server/ 2>/dev/null)
-          echo "$cf" | grep -Eo 'nice-dcv-server[^"]*{{ ubuntu_token }}[^"]*\.deb' > /tmp/cf.txt 2>/dev/null
-          OUT=$(head -n1 /tmp/cf.txt)
-          if [ -n "$OUT" ]; then
-            OUT="https://d1uj6qtbmh3dt5.cloudfront.net/server/$OUT"
-          fi
+        # 3) get Servers/ listing
+        srv=$(curl -fsS -m 20 https://d1uj6qtbmh3dt5.cloudfront.net/$last_version/Servers/ 2>/dev/null)
+
+        # Normalize ubuntu token: ubuntu2004 -> Ubuntu2004
+        UB=$(printf '%s\n' "{{ ubuntu_token }}" | sed 's/ubuntu/Ubuntu/')
+
+        echo "$srv" | grep -Eo "$UB" > /tmp/dcv_ubuntu_folder.txt
+
+        ubuntu_folder=$(head -n1 /tmp/dcv_ubuntu_folder.txt)
+
+        if [ -z "$ubuntu_folder" ]; then
+          echo ""
+          exit 1
         fi
 
-        # --- FINAL FALLBACK (guaranteed working pattern for major Ubuntu)
-        if [ -z "$OUT" ]; then
-          case "{{ ubuntu_token }}" in
-            ubuntu2004)
-              OUT="https://d1uj6qtbmh3dt5.cloudfront.net/2024.1/Servers/Ubuntu2004/x86_64/nice-dcv-server_2024.1.15167-1_amd64.ubuntu2004.deb"
-              ;;
-            ubuntu2204)
-              OUT="https://d1uj6qtbmh3dt5.cloudfront.net/2024.1/Servers/Ubuntu2204/x86_64/nice-dcv-server_2024.1.15167-1_amd64.ubuntu2204.deb"
-              ;;
-            ubuntu2404)
-              OUT="https://d1uj6qtbmh3dt5.cloudfront.net/2024.1/Servers/Ubuntu2404/x86_64/nice-dcv-server_2024.1.15167-1_amd64.ubuntu2404.deb"
-              ;;
-          esac
+        # 4) get architecture folder
+        arch=$(curl -fsS -m 20 https://d1uj6qtbmh3dt5.cloudfront.net/$last_version/Servers/$ubuntu_folder/x86_64/ 2>/dev/null)
+
+        echo "$arch" | grep -Eo 'nice-dcv-server[^"]+\.deb' > /tmp/dcv_debs.txt
+
+        deb=$(head -n1 /tmp/dcv_debs.txt)
+
+        if [ -z "$deb" ]; then
+          echo ""
+          exit 1
         fi
 
-        printf "%s" "$OUT"
+        # 5) final URL
+        echo "https://d1uj6qtbmh3dt5.cloudfront.net/$last_version/Servers/$ubuntu_folder/x86_64/$deb"
+
       register: dcv_url_raw
 
-    - name: Clean DCV URL (trim spaces)
+    - name: Clean DCV URL
       set_fact:
-        dcv_url: "{{ dcv_url_raw.stdout | trim }}"
+        DCV_DOWNLOAD_URL: "{{ dcv_url_raw.stdout | trim }}"
 
-    - name: Show final URL (guaranteed not empty)
+    - name: Show final URL
       debug:
-        msg: "DCV_DOWNLOAD_URL = {{ dcv_url }}"
+        msg: "DCV_DOWNLOAD_URL = {{ DCV_DOWNLOAD_URL }}"
 
-    - name: Fail if URL STILL empty (should never happen)
+    - name: Fail if URL empty
       fail:
-        msg: "DCV download URL empty — aborting!"
-      when: dcv_url | length < 5
+        msg: "DCV URL detection failed!"
+      when: DCV_DOWNLOAD_URL | length == 0
 
-    - name: Download DCV
+    # -----------------------------------------------------
+    # Download DCV
+    # -----------------------------------------------------
+    - name: Download DCV installer
       get_url:
-        url: "{{ dcv_url }}"
+        url: "{{ DCV_DOWNLOAD_URL }}"
         dest: /tmp/dcv.deb
         mode: '0644'
+      register: dcv_download
 
     - name: Install DCV
       apt:
         deb: /tmp/dcv.deb
+      when: dcv_download is succeeded
+
+    # -----------------------------------------------------
+    # Install optional tools (from Jenkins JSON)
+    # -----------------------------------------------------
+    - name: Install tools defined in pipeline
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ tools_to_install }}"
+      when: tools_to_install | length > 0
 
