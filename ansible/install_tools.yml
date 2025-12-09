@@ -1,113 +1,103 @@
 ---
-- name: Install tools + MATE GUI + NICE DCV
-  hosts: ec2
+- name: Install XFCE Desktop + NICE DCV + Tools
+  hosts: all
   become: yes
-
-  vars:
-    tools_to_install: []
 
   tasks:
 
+    # -------------------------------------------------------
+    # Update system
+    # -------------------------------------------------------
     - name: Update APT cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install base packages
+    - name: Install base utilities
       apt:
         name:
-          - wget
           - curl
-          - unzip
+          - wget
+          - jq
           - gpg
-          - python3-pip
         state: present
 
-    # --------------------------
-    # INSTALL MATE DESKTOP (BEST FOR EC2 + DCV)
-    # --------------------------
-    - name: Install MATE Desktop (full)
+    # -------------------------------------------------------
+    # Install XFCE Desktop (lightweight, FAST)
+    # -------------------------------------------------------
+    - name: Install XFCE Desktop
       apt:
         name:
-          - ubuntu-mate-core
-          - ubuntu-mate-desktop
+          - xfce4
+          - xfce4-goodies
         state: present
 
-    - name: Ensure systemd default target is graphical
-      file:
-        src: /lib/systemd/system/graphical.target
-        dest: /etc/systemd/system/default.target
-        state: link
-        force: yes
+    - name: Install LightDM display manager
+      apt:
+        name: lightdm
+        state: present
 
-    # --------------------------
-    # AUTO-DETECT UBUNTU VERSION FOR DCV
-    # --------------------------
-    - name: Gather OS facts
-      ansible.builtin.setup:
-
-    - name: Build Ubuntu version token
+    # -------------------------------------------------------
+    # Detect Ubuntu version for DCV
+    # -------------------------------------------------------
+    - name: Detect Ubuntu version
       set_fact:
-        ubuntu_token: "ubuntu{{ ansible_distribution_major_version }}{{ ansible_distribution_release | regex_replace('[^0-9]', '') }}"
-      when: ansible_os_family == "Debian"
+        ubuntu_major: "{{ ansible_distribution_major_version }}"
+        ubuntu_token: "ubuntu{{ ansible_distribution_version | regex_replace('\\.', '') }}"
 
-    - name: Debug ubuntu token
+    - name: Debug Ubuntu token
       debug:
-        msg: "Ubuntu token selected: {{ ubuntu_token }}"
+        msg: "Ubuntu detected: {{ ubuntu_token }}"
 
-    # --------------------------
-    # GET LATEST NICE DCV VERSION DYNAMICALLY
-    # This scrapes the version index from AWS (safe & supported)
-    # --------------------------
-    - name: Fetch DCV version index
+    # -------------------------------------------------------
+    # Detect LATEST DCV version dynamically
+    # -------------------------------------------------------
+    - name: Get latest DCV release version
       shell: |
-        curl -s https://d1uj6qtbmh3dt5.cloudfront.net/ | grep -oP '202[0-9]\.[0-9]' | sort -V | tail -1
-      register: dcv_version_raw
+        curl -fsS https://d1uj6qtbmh3dt5.cloudfront.net/ \
+        | grep -Eo '[0-9]{4}\.[0-9]+' \
+        | sort -V \
+        | tail -n1
+      register: dcv_version
 
-    - name: Set DCV version
-      set_fact:
-        dcv_version: "{{ dcv_version_raw.stdout }}"
-
-    - name: Debug final DCV version
+    - name: Debug DCV version found
       debug:
-        msg: "Latest DCV version detected: {{ dcv_version }}"
+        msg: "DCV version = {{ dcv_version.stdout }}"
 
-    # --------------------------
-    # CONSTRUCT DOWNLOAD URL
-    # --------------------------
-    - name: Build DCV download URL
+    - name: Find DCV .deb package for Ubuntu
+      shell: |
+        curl -fsS https://d1uj6qtbmh3dt5.cloudfront.net/{{ dcv_version.stdout }}/Servers/Ubuntu{{ ubuntu_major }}04/x86_64/ \
+        | grep -Eo 'nice-dcv-server[^"]+\.deb' \
+        | head -n1
+      register: dcv_deb
+
+    - name: Build DCV URL
       set_fact:
-        dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/{{ dcv_version }}/Servers/Ubuntu2004/x86_64/nice-dcv-server_{{ dcv_version }}.{{ ansible_distribution_major_version }}-1_amd64.ubuntu2004.deb"
+        dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/{{ dcv_version.stdout }}/Servers/Ubuntu{{ ubuntu_major }}04/x86_64/{{ dcv_deb.stdout }}"
 
-    - name: Debug final URL
+    - name: Show final DCV URL
       debug:
-        msg: "DCV_INSTALL_URL: {{ dcv_url }}"
+        msg: "DCV download: {{ dcv_url }}"
 
-    # --------------------------
-    # INSTALL DCV SERVER
-    # --------------------------
-    - name: Download DCV installer
+    # -------------------------------------------------------
+    # Download + Install DCV
+    # -------------------------------------------------------
+    - name: Download DCV package
       get_url:
         url: "{{ dcv_url }}"
-        dest: /tmp/dcv.deb
-      register: dcv_download
+        dest: "/tmp/dcv.deb"
+        mode: "0644"
 
-    - name: Install DCV server
+    - name: Install DCV Server
       apt:
-        deb: /tmp/dcv.deb
+        deb: "/tmp/dcv.deb"
         state: present
-      when: dcv_download is succeeded
 
-    # --------------------------
-    # INSTALL USER REQUESTED TOOLS
-    # --------------------------
-    - name: Install user-requested tools
+    # -------------------------------------------------------
+    # Install user-selected tools
+    # -------------------------------------------------------
+    - name: Install extra tools
       apt:
         name: "{{ tools_to_install }}"
         state: present
-      when: tools_to_install | length > 0
-
-    - name: Print completion message
-      debug:
-        msg: "MATE + DCV + Tools installed successfully!"
 
