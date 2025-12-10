@@ -1,28 +1,23 @@
 ---
-- name: Install XFCE Desktop + Amazon DCV Server + tools (robust auto-download)
+- name: Install XFCE Desktop + Amazon DCV Server + tools (manual URL only)
   hosts: all
   become: yes
+
   vars:
-    # Optional override (long-lived .deb URL). Set via extra-vars if you want:
-    # ansible-playbook ... --extra-vars "dcv_download_url='https://www.amazondcv.com/.../nice-dcv-server_xxx.deb'"
-    dcv_download_url: ""
-    tools_to_install: []        # pass via --extra-vars if needed (e.g. ["htop","vim"])
+    # <<<<<<<< SET YOUR URL HERE >>>>>>>>
+    dcv_download_url: "https://d1uj6qtbmh3dt5.cloudfront.net/nice-dcv-server-2024.0-14697-ubuntu2204-x86_64.tgz"
+
+    tools_to_install: []     
     dcv_port: 8443
 
   tasks:
-    - name: Gather facts
-      ansible.builtin.setup:
-
-    - name: Show detected OS
-      ansible.builtin.debug:
-        msg: "Detected {{ ansible_distribution }} {{ ansible_distribution_version }} (family={{ ansible_os_family }})"
 
     - name: Ensure apt cache is updated
       ansible.builtin.apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install base utilities (curl, wget, jq)
+    - name: Install base utilities
       ansible.builtin.apt:
         name:
           - curl
@@ -30,19 +25,15 @@
           - jq
           - ca-certificates
           - apt-transport-https
-          - lsb-release
-          - gnupg
         state: present
 
-    # Lightweight desktop recommended for DCV (XFCE)
-    - name: Install XFCE (lightweight desktop)
+    # Lightweight desktop
+    - name: Install XFCE desktop
       ansible.builtin.apt:
-        name:
-          - xfce4
+        name: xfce4
         state: present
-        update_cache: yes
 
-    - name: Install lightdm (display manager)
+    - name: Install LightDM
       ansible.builtin.apt:
         name: lightdm
         state: present
@@ -59,170 +50,95 @@
           - libxcb-xinerama0
         state: present
 
-    # Build ubuntu token like ubuntu2004 / ubuntu2204 etc.
-    - name: Build ubuntu token
-      ansible.builtin.set_fact:
-        ubuntu_token: "ubuntu{{ ansible_distribution_version.split('.')[0] }}{{ ansible_distribution_version.split('.')[1] | default('04') }}"
+    # ------------------------------
+    #   DCV MANUAL URL ONLY
+    # ------------------------------
 
-    - name: Debug ubuntu token
-      ansible.builtin.debug:
-        msg: "ubuntu_token = {{ ubuntu_token }}"
-
-    # If user supplied override, use it first
-    - name: Use provided DCV URL if set
-      ansible.builtin.set_fact:
-        DCV_DOWNLOAD_URL: "{{ dcv_download_url | trim }}"
-      when: dcv_download_url is defined and (dcv_download_url | length) > 0
-
-    # --- Method A: try official amazondcv.com page for long-lived .deb links ---
-    - name: Try to find .deb on amazondcv.com (preferred long-lived links)
-      ansible.builtin.shell: |
-        # fetch page and extract .deb links; prefer ones containing ubuntu token
-        PAGE=$(curl -fsS https://www.amazondcv.com/ 2>/dev/null || true)
-        echo "$PAGE" | grep -Eo 'https?://[^"]*nice-dcv-server[^"]*\.deb' > /tmp/amazondcv_links.txt || true
-        # prefer link containing ubuntu token
-        token="{{ ubuntu_token }}"
-        if [ -s /tmp/amazondcv_links.txt ]; then
-          grep -i "$token" /tmp/amazondcv_links.txt | head -n1 || head -n1 /tmp/amazondcv_links.txt
-        else
-          echo ""
-        fi
-      register: amazondcv_link
-      changed_when: false
-      when: DCV_DOWNLOAD_URL is not defined or DCV_DOWNLOAD_URL == ""
-
-    - name: Use amazondcv.com link if found
-      ansible.builtin.set_fact:
-        DCV_DOWNLOAD_URL: "{{ amazondcv_link.stdout | trim }}"
-      when:
-        - amazondcv_link is defined
-        - amazondcv_link.stdout | length > 0
-        - (DCV_DOWNLOAD_URL is not defined or DCV_DOWNLOAD_URL == "")
-
-    # --- Method B: Probe CloudFront directory listings for recent versions ---
-    - name: Probe CloudFront for a matching .deb as fallback
-      ansible.builtin.shell: |
-        # Try to detect recent versions on CloudFront and find a matching .deb
-        ROOT=$(curl -fsS https://d1uj6qtbmh3dt5.cloudfront.net/ 2>/dev/null || true)
-        # extract version tokens (like 2025.0, 2024.2), keep last 12 unique sorted
-        VERS=$(echo "$ROOT" | grep -Eo '[0-9]{4}\.[0-9]+' | sort -V | uniq | tail -n 12)
-        UB_DIR="Ubuntu{{ ansible_distribution_version.split('.')[0] }}{{ ansible_distribution_version.split('.')[1] | default('04') }}"
-        for v in $VERS; do
-          LIST=$(curl -fsS "https://d1uj6qtbmh3dt5.cloudfront.net/$v/Servers/$UB_DIR/x86_64/" 2>/dev/null || true)
-          F=$(echo "$LIST" | grep -Eo 'nice-dcv-server[^"]*\.deb' | head -n1 || true)
-          if [ -n "$F" ]; then
-            echo "https://d1uj6qtbmh3dt5.cloudfront.net/$v/Servers/$UB_DIR/x86_64/$F"
-            exit 0
-          fi
-        done
-        # nothing found
-        echo ""
-      register: cloudfront_url
-      changed_when: false
-      when: DCV_DOWNLOAD_URL is not defined or DCV_DOWNLOAD_URL == ""
-
-    - name: Use cloudfront fallback if present
-      ansible.builtin.set_fact:
-        DCV_DOWNLOAD_URL: "{{ cloudfront_url.stdout | trim }}"
-      when:
-        - cloudfront_url is defined
-        - cloudfront_url.stdout | length > 0
-        - (DCV_DOWNLOAD_URL is not defined or DCV_DOWNLOAD_URL == "")
-
-    - name: Fail if DCV URL not found (helpful message)
+    - name: Fail if no manual DCV URL provided
       ansible.builtin.fail:
-        msg: |
-          Could not automatically determine Amazon DCV .deb URL.
-          Options:
-            * Provide a direct URL using dcv_download_url extra-var:
-              ansible-playbook ... --extra-vars "dcv_download_url='https://www.amazondcv.com/long-lived/.../nice-dcv-server_xxx.deb'"
-            * Ensure instance has outbound internet and https://www.amazondcv.com/ is reachable from the instance.
-      when: DCV_DOWNLOAD_URL is not defined or (DCV_DOWNLOAD_URL | length) == 0
+        msg: "You must set dcv_download_url with a direct DCV .deb/.tgz URL"
+      when: dcv_download_url is undefined or dcv_download_url | length == 0
 
-    - name: Show final DCV URL
+    - name: Print DCV URL being used
       ansible.builtin.debug:
-        msg: "Using DCV URL = {{ DCV_DOWNLOAD_URL }}"
+        msg: "Using manual DCV URL: {{ dcv_download_url }}"
 
-    - name: Extract filename from DCV URL
+    - name: Extract filename from URL
       ansible.builtin.set_fact:
-        dcv_filename: "{{ (DCV_DOWNLOAD_URL.split('/') | last) | default('dcv.deb') }}"
+        dcv_filename: "{{ dcv_download_url.split('/') | last }}"
 
-    - name: Download DCV package to /tmp/{{ dcv_filename }}
+    - name: Download DCV package
       ansible.builtin.get_url:
-        url: "{{ DCV_DOWNLOAD_URL }}"
+        url: "{{ dcv_download_url }}"
         dest: "/tmp/{{ dcv_filename }}"
         mode: "0644"
-        validate_certs: yes
-      register: download_result
-      retries: 2
-      delay: 5
-      until: download_result is succeeded
 
-    - name: Install DCV server package
+    - name: Untar DCV if .tgz
+      ansible.builtin.unarchive:
+        src: "/tmp/{{ dcv_filename }}"
+        dest: /tmp/dcv/
+        remote_src: yes
+      when: dcv_filename.endswith(".tgz")
+
+    - name: Install DCV server (TGZ installer)
+      ansible.builtin.shell: |
+        cd /tmp/dcv/nice-dcv-* && ./install-dcv.sh
+      when: dcv_filename.endswith(".tgz")
+
+    - name: Install DCV server (.deb)
       ansible.builtin.apt:
         deb: "/tmp/{{ dcv_filename }}"
         state: present
+      when: dcv_filename.endswith(".deb")
 
-    - name: Ensure dcvserver enabled and started
+    - name: Enable DCV service
       ansible.builtin.systemd:
         name: dcvserver
         enabled: yes
         state: started
-        daemon_reload: yes
 
-    - name: Create minimal DCV config if missing
+    - name: Create minimal DCV config
       ansible.builtin.copy:
         dest: /etc/dcv/dcv.ini
         content: |
           [license]
           # license_file = /etc/dcv/nice-dcv-license.lic
-
-          [ssl]
-          # key = /etc/dcv/keys/server.key
-          # cert = /etc/dcv/keys/server.crt
         owner: root
         group: root
         mode: '0644'
         force: no
 
-    - name: Add ubuntu user to video group (if present)
-      ansible.builtin.user:
-        name: ubuntu
-        groups: video
-        append: yes
-      when: "'ubuntu' in ansible_facts['passwd']"
-
-    - name: Try to allow DCV port via ufw (if available)
+    - name: Allow DCV port via UFW (optional)
       block:
-        - name: Ensure ufw installed
+        - name: Install ufw
           ansible.builtin.apt:
             name: ufw
             state: present
 
-        - name: Allow DCV port on ufw
+        - name: Allow DCV port
           ansible.builtin.ufw:
             rule: allow
             port: "{{ dcv_port }}"
             proto: tcp
       rescue:
         - ansible.builtin.debug:
-            msg: "ufw not available or configured; ensure AWS SG allows inbound {{ dcv_port }}/tcp"
+            msg: "ufw not available — ensure security group allows port {{ dcv_port }}"
 
-    - name: Restart dcvserver to pick up config
+    - name: Restart DCV
       ansible.builtin.systemd:
         name: dcvserver
         state: restarted
 
-    - name: Install extra requested tools (if any)
+    - name: Install extra tools
       ansible.builtin.apt:
-        name: "{{ tools_to_install | default([]) }}"
+        name: "{{ tools_to_install }}"
         state: present
       when: tools_to_install | length > 0
 
-    - name: Print DCV connection info
+    - name: Show connection info
       ansible.builtin.debug:
         msg: |
-          Amazon DCV installed and running.
-          Connect using DCV client to: https://{{ ansible_default_ipv4.address }}:{{ dcv_port }}
-          Ensure AWS Security Group allows inbound {{ dcv_port }}/TCP.
+          DCV installed successfully.
+          Connect via https://{{ ansible_default_ipv4.address }}:{{ dcv_port }}
+          Make sure port {{ dcv_port }} is allowed in AWS SG.
 
