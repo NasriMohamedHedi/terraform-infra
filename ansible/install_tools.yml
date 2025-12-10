@@ -1,213 +1,71 @@
 ---
-- name: Install XFCE Desktop + Amazon DCV Server + optional web viewer (manual URL)
+- name: Install XFCE Desktop + Amazon DCV Server + tools
   hosts: all
-  become: true
+  become: yes
+
   vars:
-    # Hard-coded DCV tarball URL (long-lived link maintained by Amazon)
-    # This playbook targets Ubuntu 20.04 (ubuntu-focal).
-    # If you switch to Ubuntu 22.04/24.04, change to nice-dcv-ubuntu2204-x86_64.tgz / nice-dcv-ubuntu2404-x86_64.tgz
-    dcv_download_url: "https://d1uj6qtbmh3dt5.cloudfront.net/nice-dcv-ubuntu2004-x86_64.tgz"
-
-    # Port DCV listens on
-    dcv_port: 8443
-
-    # Extra tools to install (pass via --extra-vars or change here)
-    tools_to_install: ["htop", "vim"]
-
-    # Whether to also install the web viewer package (true/false)
-    install_web_viewer: true
+    # DCV URL for Ubuntu 20.04 (x86_64)
+    dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2024.2/Servers/Ubuntu2004/x86_64/nice-dcv-server_2024.2.15364-1_ubuntu2004_amd64.deb"
 
   tasks:
-    - name: Gather facts
-      ansible.builtin.setup:
 
-    - name: Show detected OS for clarity
-      ansible.builtin.debug:
-        msg: "Detected {{ ansible_distribution }} {{ ansible_distribution_version }} (family={{ ansible_os_family }})"
-
-    - name: Ensure apt cache is updated
-      ansible.builtin.apt:
+    - name: Update apt cache
+      apt:
         update_cache: yes
-        cache_valid_time: 3600
 
-    - name: Install base utilities required
-      ansible.builtin.apt:
+    - name: Install base utilities
+      apt:
         name:
           - curl
           - wget
-          - tar
           - jq
-          - ca-certificates
-          - apt-transport-https
-          - lsb-release
-          - gnupg
+          - gpg
         state: present
 
-    - name: Install lightweight desktop (XFCE) and minimal X stack
-      ansible.builtin.apt:
+    - name: Install XFCE desktop
+      apt:
         name:
           - xfce4
-          - xfce4-terminal
-          - xorg
-          - dbus-x11
-          - policykit-1
-          - pulseaudio
+          - xfce4-goodies
         state: present
-        update_cache: yes
+
+    - name: Install LightDM
+      apt:
+        name: lightdm
+        state: present
 
     - name: Install DCV runtime dependencies
-      ansible.builtin.apt:
+      apt:
         name:
-          - libgl1
-          - libxcb-icccm4
-          - libxcb-image0
-          - libxcb-keysyms1
-          - libxcb-randr0
-          - libxcb-render-util0
-          - libxcb-xinerama0
-          - ca-certificates
+          - python3
+          - python3-pip
+          - pcscd
+          - mesa-utils
+          - dkms
+          - linux-headers-generic
         state: present
 
-    - name: Print which DCV URL we will use
-      ansible.builtin.debug:
-        msg: "Using DCV tarball URL: {{ dcv_download_url }}"
+    - name: Print DCV URL
+      debug:
+        msg: "Installing DCV from {{ dcv_url }}"
 
-    - name: Ensure /tmp/dcv workspace exists
-      ansible.builtin.file:
-        path: /tmp/dcv-install
-        state: directory
-        mode: '0755'
-
-    - name: Download DCV tarball to /tmp/dcv-install/dcv.tgz
-      ansible.builtin.get_url:
-        url: "{{ dcv_download_url }}"
-        dest: /tmp/dcv-install/dcv.tgz
+    - name: Download DCV package
+      get_url:
+        url: "{{ dcv_url }}"
+        dest: "/tmp/dcv.deb"
         mode: '0644'
-        validate_certs: yes
-      register: dcv_dl
-      retries: 2
-      delay: 5
-      until: dcv_dl is succeeded
 
-    - name: Fail early if tarball missing after download attempt
-      ansible.builtin.stat:
-        path: /tmp/dcv-install/dcv.tgz
-      register: dcv_tgz_stat
-
-    - name: Abort: DCV archive not downloaded
-      ansible.builtin.fail:
-        msg: >
-          DCV download failed or tarball missing at /tmp/dcv-install/dcv.tgz.
-          Confirm the URL in the playbook (dcv_download_url) and that the instance has outbound internet access.
-      when: not dcv_tgz_stat.stat.exists
-
-    - name: Extract DCV tarball
-      ansible.builtin.unarchive:
-        src: /tmp/dcv-install/dcv.tgz
-        dest: /tmp/dcv-install
-        remote_src: yes
-
-    - name: Find the DCV server .deb file inside extracted folder
-      ansible.builtin.find:
-        paths: /tmp/dcv-install
-        patterns: "nice-dcv-server*.deb"
-        recurse: yes
-      register: dcv_debs
-
-    - name: Fail if no server .deb found
-      ansible.builtin.fail:
-        msg: "Could not find nice-dcv-server .deb in the tarball extraction. Listing: {{ dcv_debs.files | map(attribute='path') | list }}"
-      when: dcv_debs.matched == 0
-
-    - name: Select first server deb path
-      ansible.builtin.set_fact:
-        dcv_server_deb: "{{ (dcv_debs.files | sort(attribute='path') | first).path }}"
-
-    - name: Debug chosen server deb
-      ansible.builtin.debug:
-        msg: "Installing DCV server package from {{ dcv_server_deb }}"
-
-    - name: Install DCV server package
-      ansible.builtin.apt:
-        deb: "{{ dcv_server_deb }}"
+    - name: Install DCV .deb package
+      apt:
+        deb: "/tmp/dcv.deb"
         state: present
 
-    - name: If requested, find nice-dcv-web-viewer .deb
-      ansible.builtin.find:
-        paths: /tmp/dcv-install
-        patterns: "nice-dcv-web-viewer*.deb"
-        recurse: yes
-      register: webviewer_debs
-      when: install_web_viewer | bool
-
-    - name: Install DCV web viewer (optional)
-      ansible.builtin.apt:
-        deb: "{{ (webviewer_debs.files | first).path }}"
-        state: present
-      when:
-        - install_web_viewer | bool
-        - webviewer_debs.matched > 0
-
-    - name: Ensure dcvserver is enabled and started
-      ansible.builtin.systemd:
-        name: dcvserver
-        enabled: yes
-        state: started
-        daemon_reload: yes
-
-    - name: Create minimal /etc/dcv/dcv.ini (no license) if missing
-      ansible.builtin.copy:
-        dest: /etc/dcv/dcv.ini
-        content: |
-          [license]
-          # add license_file = /etc/dcv/nice-dcv-license.lic if you have one
-
-          [ssl]
-          # key = /etc/dcv/keys/server.key
-          # cert = /etc/dcv/keys/server.crt
-        owner: root
-        group: root
-        mode: '0644'
-        force: no
-
-    - name: Add ubuntu user to video group (helps with hardware acceleration)
-      ansible.builtin.user:
-        name: ubuntu
-        groups: video
-        append: yes
-      when: "'ubuntu' in ansible_facts['passwd']"
-
-    - name: Try to install and allow port in ufw (best-effort)
-      block:
-        - name: Ensure ufw installed
-          ansible.builtin.apt:
-            name: ufw
-            state: present
-
-        - name: Allow DCV port via ufw
-          ansible.builtin.ufw:
-            rule: allow
-            port: "{{ dcv_port }}"
-            proto: tcp
-      rescue:
-        - ansible.builtin.debug:
-            msg: "ufw not available or failed; ensure your AWS Security Group allows inbound {{ dcv_port }}/TCP."
-
-    - name: Install extra requested tools (if any)
-      ansible.builtin.apt:
+    - name: Install extra tools
+      apt:
         name: "{{ tools_to_install }}"
         state: present
-      when: tools_to_install | length > 0
 
-    - name: Restart dcvserver to pick up config
-      ansible.builtin.systemd:
-        name: dcvserver
-        state: restarted
-
-    - name: Print DCV connection info
-      ansible.builtin.debug:
-        msg: |
-          Amazon DCV installed and (attempted) started.
-          Connect using DCV client to: https://{{ ansible_default_ipv4.address }}:{{ dcv_port }}
-          Important: also ensure the EC2 Security Group allows inbound {{ dcv_port }}/TCP from your client.
+    - name: Reboot after DCV install
+      reboot:
+        msg: "Rebooting to finalize DCV installation"
 
