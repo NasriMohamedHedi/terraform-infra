@@ -1,78 +1,75 @@
 ---
-- name: Install XFCE Desktop + Amazon DCV Server + tools
+- name: Install Desktop + DCV Server on Ubuntu 22.04
   hosts: all
   become: yes
 
   vars:
-    # Latest stable DCV for Ubuntu 22.04 (x86_64)
-    dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2025.0/Servers/Ubuntu2204/x86_64/nice-dcv-server_2025.0.20103-1_ubuntu2204_amd64.deb"
+    dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2025.0/Servers/nice-dcv-2025.0-20103-ubuntu2204-x86_64.tgz"
 
   tasks:
 
-    - name: Update apt cache
+    - name: Update apt repository
       apt:
         update_cache: yes
 
-    - name: Install base utilities
-      apt:
-        name:
-          - curl
-          - wget
-          - jq
-          - gpg
-        state: present
-
-    - name: Install XFCE desktop
-      apt:
-        name:
-          - xfce4
-          - xfce4-goodies
-        state: present
-
-    - name: Install LightDM
-      apt:
-        name: lightdm
-        state: present
-
-    - name: Install DCV runtime dependencies
+    - name: Install required dependencies
       apt:
         name:
           - python3
           - python3-pip
-          - pcscd
-          - mesa-utils
-          - dkms
-          - linux-headers-generic
+          - build-essential
+          - wget
+          - curl
+          - unzip
+          - tar
+          - xserver-xorg
+          - ubuntu-mate-desktop
         state: present
 
-    - name: Print DCV URL
-      debug:
-        msg: "Installing DCV from {{ dcv_url }}"
-
-    - name: Download DCV package
+    - name: Download DCV Server package
       get_url:
         url: "{{ dcv_url }}"
-        dest: "/tmp/dcv.deb"
-        mode: '0644'
-      register: dcv_download
+        dest: "/tmp/dcv.tgz"
+        mode: '0755'
 
-    - name: Abort if DCV failed to download
-      fail:
-        msg: "❌ DCV package failed to download from {{ dcv_url }}!"
-      when: dcv_download.failed is defined and dcv_download.failed
+    - name: Extract DCV server package
+      unarchive:
+        src: "/tmp/dcv.tgz"
+        dest: "/tmp/dcv"
+        remote_src: yes
 
-    - name: Install DCV .deb package
-      apt:
-        deb: "/tmp/dcv.deb"
-        state: present
+    - name: Install all DCV .deb packages
+      shell: |
+        cd /tmp/dcv
+        apt install -y ./*.deb
+      args:
+        executable: /bin/bash
 
-    - name: Install extra tools
-      apt:
-        name: "{{ tools_to_install }}"
-        state: present
-      when: tools_to_install is defined
+    - name: Enable and start DCV service
+      systemd:
+        name: dcvserver
+        enabled: yes
+        state: started
 
-    - name: Reboot after DCV install
-      reboot:
-        msg: "Rebooting to finalize DCV installation"
+    - name: Allow DCV port 8443 (HTTPS)
+      ufw:
+        rule: allow
+        port: 8443
+        proto: tcp
+
+    - name: Enable user for DCV session
+      copy:
+        dest: /etc/dcv/dcv.conf
+        content: |
+          [security]
+          authentication="system"
+          
+          [session-management]
+          create-session=1
+          default-desktop-env=mate
+
+    - name: Restart DCV server
+      systemd:
+        name: dcvserver
+        state: restarted
 
