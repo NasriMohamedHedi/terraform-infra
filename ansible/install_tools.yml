@@ -4,8 +4,8 @@
   become: yes
 
   vars:
-    # DCV URL for Ubuntu 20.04 (x86_64)
-    dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2024.2/Servers/Ubuntu2004/x86_64/nice-dcv-server_2024.2.15364-1_ubuntu2004_amd64.deb"
+    # Latest stable DCV for Ubuntu 22.04 (x86_64)
+    dcv_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2025.0/Servers/Ubuntu2204/x86_64/nice-dcv-server_2025.0.20103-1_ubuntu2204_amd64.deb"
 
   tasks:
 
@@ -54,6 +54,12 @@
         url: "{{ dcv_url }}"
         dest: "/tmp/dcv.deb"
         mode: '0644'
+      register: dcv_download
+
+    - name: Abort if DCV failed to download
+      fail:
+        msg: "❌ DCV package failed to download from {{ dcv_url }}!"
+      when: dcv_download.failed is defined and dcv_download.failed
 
     - name: Install DCV .deb package
       apt:
@@ -64,6 +70,7 @@
       apt:
         name: "{{ tools_to_install }}"
         state: present
+      when: tools_to_install is defined
 
     - name: Reboot after DCV install
       reboot:
