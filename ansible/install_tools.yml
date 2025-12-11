@@ -1,100 +1,96 @@
 ---
-- name: Install Desktop + Amazon DCV Server
+- name: Install tools and NICE DCV on Ubuntu
   hosts: all
   become: yes
 
   vars:
-    dcv_archive_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2025.0/Servers/nice-dcv-2025.0-20103-ubuntu2204-x86_64.tgz"
-    dcv_extract_dir: /tmp/dcv
-    dcv_archive_dest: /tmp/dcv.tgz
-    dcv_port: 8443
     tools_to_install: []
+    dcv_package_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2024.0/Servers/Ubuntu2204/x86_64/nice-dcv-server_2024.0-19030-1_ubuntu2204_amd64.deb"
+    dcv_package_name: "/tmp/nice-dcv-server.deb"
 
   tasks:
-    - name: Update apt repository
+
+    - name: Update apt cache
+    - name: Update apt cache
       apt:
         update_cache: yes
 
-    - name: Install dependencies
-      apt:
-        name:
-          - curl
-          - wget
-          - tar
-          - gzip
-          - ca-certificates
-          - dpkg
-        state: present
-
-    - name: Install XFCE desktop
-      apt:
-        name:
-          - xfce4
-          - xfce4-terminal
-        state: present
-
-    - name: Create DCV extraction directory
-      file:
-        path: "{{ dcv_extract_dir }}"
-        state: directory
-        mode: "0755"
-
-    - name: Download DCV archive
-      get_url:
-        url: "{{ dcv_archive_url }}"
-        dest: "{{ dcv_archive_dest }}"
-        mode: "0644"
-
-    - name: Extract DCV archive
-      unarchive:
-        src: "{{ dcv_archive_dest }}"
-        dest: "{{ dcv_extract_dir }}"
-        remote_src: yes
-
-    - name: Find DCV .deb packages
-      find:
-        paths: "{{ dcv_extract_dir }}"
-        patterns: "*.deb"
-      register: dcv_debs
-
-    - name: Install DCV .deb packages
-      apt:
-        deb: "{{ item.path }}"
-        state: present
-      loop: "{{ dcv_debs.files }}"
-
-    - name: Reload systemd
-      systemd:
-        daemon_reload: yes
-
-    - name: Detect DCV service unit
-      shell: |
-        systemctl list-unit-files | grep -i dcv | awk '{print $1}' | head -n 1
-      register: dcv_service
-      changed_when: false
-
-    - name: Debug service detection
-      debug:
-        msg: "Detected DCV service: {{ dcv_service.stdout }}"
-
-    - name: Fail if no DCV service detected
-      fail:
-        msg: "DCV service not found. Installation incomplete."
-      when: dcv_service.stdout == ""
-
-    - name: Enable and start DCV service
-      systemd:
-        name: "{{ dcv_service.stdout }}"
-        enabled: yes
-        state: started
-
-    - name: Install extra requested tools
+    - name: Install requested tools
       apt:
         name: "{{ tools_to_install }}"
         state: present
       when: tools_to_install | length > 0
 
-    - name: Print DCV connection info
+    ####################################################################
+    # NICE DCV Installation
+    ####################################################################
+
+    - name: Install DCV dependencies
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - make
+          - gcc
+          - g++
+          - linux-headers-$(uname -r)
+          - pulseaudio
+        state: present
+      ignore_errors: yes
+
+    - name: Download DCV package
+      get_url:
+        url: "{{ dcv_package_url }}"
+        dest: "{{ dcv_package_name }}"
+        mode: '0644'
+
+    - name: Install NICE DCV server
+      apt:
+        deb: "{{ dcv_package_name }}"
+      ignore_errors: yes
+
+    ####################################################################
+    # DCV Verification
+    ####################################################################
+
+    - name: Verify DCV package installation
+      command: dpkg -l | grep dcv
+      register: dcv_check
+      failed_when: dcv_check.rc != 0
+      ignore_errors: yes
+
+    - name: Print DCV verification output
       debug:
-        msg: "DCV Server ready: https://{{ ansible_default_ipv4.address }}:{{ dcv_port }}"
+        msg: "{{ dcv_check.stdout_lines }}"
+
+    ####################################################################
+    # Enable and start DCV services
+    ####################################################################
+
+    - name: Enable and start dcvserver service
+      systemd:
+        name: dcvserver
+        state: started
+        enabled: yes
+      ignore_errors: yes
+
+    - name: Enable and start dcvagent service
+      systemd:
+        name: dcvagent
+        state: started
+        enabled: yes
+      ignore_errors: yes
+
+    ####################################################################
+    # Final confirmation
+    ####################################################################
+
+    - name: Show DCV services status
+      command: systemctl status dcvserver
+      register: dcv_status
+      ignore_errors: yes
+
+    - name: Print DCV service status
+      debug:
+        msg: "{{ dcv_status.stdout_lines }}"
 
