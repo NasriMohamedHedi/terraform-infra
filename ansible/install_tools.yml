@@ -1,206 +1,100 @@
 ---
-- name: Install Desktop + Amazon DCV Server (robust install + service detection)
+- name: Install Desktop + Amazon DCV Server
   hosts: all
   become: yes
+
   vars:
-    # Set this to the exact DCV archive URL you want to install (tgz from amazondcv/cloudfront)
     dcv_archive_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2025.0/Servers/nice-dcv-2025.0-20103-ubuntu2204-x86_64.tgz"
     dcv_extract_dir: /tmp/dcv
     dcv_archive_dest: /tmp/dcv.tgz
     dcv_port: 8443
-    # Optional: list of extra apt packages you want installed (passed from Jenkins payload)
     tools_to_install: []
 
   tasks:
-    - name: Gather facts
-      ansible.builtin.setup:
-
-    - name: Show detected OS
-      ansible.builtin.debug:
-        msg: "Detected {{ ansible_distribution }} {{ ansible_distribution_version }} (family={{ ansible_os_family }})"
-
-    - name: Update apt cache
-      ansible.builtin.apt:
+    - name: Update apt repository
+      apt:
         update_cache: yes
-        cache_valid_time: 3600
 
-    - name: Install base packages required for download & extraction
-      ansible.builtin.apt:
+    - name: Install dependencies
+      apt:
         name:
           - curl
           - wget
           - tar
           - gzip
           - ca-certificates
-          - gnupg
           - dpkg
-          - apt-transport-https
         state: present
 
-    - name: Install lightweight desktop environment XFCE (recommended)
-      ansible.builtin.apt:
+    - name: Install XFCE desktop
+      apt:
         name:
           - xfce4
           - xfce4-terminal
         state: present
-        update_cache: yes
 
-    - name: Ensure DCV extraction dir exists
-      ansible.builtin.file:
+    - name: Create DCV extraction directory
+      file:
         path: "{{ dcv_extract_dir }}"
         state: directory
-        mode: '0755'
+        mode: "0755"
 
-    - name: Download DCV archive (tgz)
-      ansible.builtin.get_url:
+    - name: Download DCV archive
+      get_url:
         url: "{{ dcv_archive_url }}"
         dest: "{{ dcv_archive_dest }}"
-        mode: '0644'
-        validate_certs: yes
-      register: dcv_download
-      retries: 2
-      delay: 5
-      until: dcv_download is succeeded
+        mode: "0644"
 
-    - name: Extract DCV archive into extraction directory
-      ansible.builtin.unarchive:
+    - name: Extract DCV archive
+      unarchive:
         src: "{{ dcv_archive_dest }}"
         dest: "{{ dcv_extract_dir }}"
         remote_src: yes
 
-    - name: List files extracted (debug)
-      ansible.builtin.command: "ls -lah {{ dcv_extract_dir }}"
-      register: list_extracted
-      changed_when: false
+    - name: Find DCV .deb packages
+      find:
+        paths: "{{ dcv_extract_dir }}"
+        patterns: "*.deb"
+      register: dcv_debs
 
-    - name: Show extracted files (first lines)
-      ansible.builtin.debug:
-        var: list_extracted.stdout_lines
+    - name: Install DCV .deb packages
+      apt:
+        deb: "{{ item.path }}"
+        state: present
+      loop: "{{ dcv_debs.files }}"
 
-    - name: Install DCV .deb packages (dpkg then fix deps)
-      ansible.builtin.shell: |
-        set -e
-        cd "{{ dcv_extract_dir }}"
-        # find .deb files (if archive contains subdirs)
-        DEBS=$(find . -type f -name "*.deb" -print)
-        if [ -z "$DEBS" ]; then
-          echo "NO_DEBS_FOUND"
-          exit 99
-        fi
-        # install all deb files (dpkg may leave unmet deps)
-        dpkg -i $DEBS || true
-        # fix / install missing deps
-        apt-get update -y
-        apt-get install -f -y
-      args:
-        executable: /bin/bash
-      register: dpkg_install
-      failed_when: "'NO_DEBS_FOUND' in dpkg_install.stdout or dpkg_install.rc not in [0,1]"  # rc==1 is allowed because apt-get -f returns rc sometimes
-
-    - name: Show dpkg/apt install output for debugging
-      ansible.builtin.debug:
-        var: dpkg_install.stdout_lines
-
-    - name: Reload systemd daemon (after package install)
-      ansible.builtin.systemd:
+    - name: Reload systemd
+      systemd:
         daemon_reload: yes
+
+    - name: Detect DCV service unit
+      shell: |
+        systemctl list-unit-files | grep -i dcv | awk '{print $1}' | head -n 1
+      register: dcv_service
       changed_when: false
 
-    - name: Try detect DCV systemd unit by listing unit-files with 'dcv' or 'nice-dcv'
-      ansible.builtin.shell: |
-        systemctl list-unit-files --no-pager --type=service \
-          | egrep -i 'dcv|nice' || true
-      register: possible_units
-      changed_when: false
+    - name: Debug service detection
+      debug:
+        msg: "Detected DCV service: {{ dcv_service.stdout }}"
 
-    - name: Debug possible units
-      ansible.builtin.debug:
-        var: possible_units.stdout_lines
+    - name: Fail if no DCV service detected
+      fail:
+        msg: "DCV service not found. Installation incomplete."
+      when: dcv_service.stdout == ""
 
-    - name: Extract a likely DCV unit name
-      ansible.builtin.set_fact:
-        dcv_service_unit: "{{ (possible_units.stdout_lines | select('match','(?i).*dcv.*\\.service') | list | first) | default('') }}"
-      when: possible_units.stdout_lines is defined
-
-    - name: Fallback search: check /lib/systemd/system and /etc/systemd/system for 'dcv' files
-      ansible.builtin.shell: |
-        (ls /lib/systemd/system 2>/dev/null | egrep -i 'dcv|nice' || true) ; \
-        (ls /etc/systemd/system 2>/dev/null | egrep -i 'dcv|nice' || true)
-      register: fs_units
-      changed_when: false
-      when: dcv_service_unit == "" or dcv_service_unit is not defined
-
-    - name: Set fallback dcv_service_unit from fs scan
-      ansible.builtin.set_fact:
-        dcv_service_unit: "{{ (fs_units.stdout_lines | select('match','(?i).*dcv.*\\.service') | list | first) | default(dcv_service_unit | default('')) }}"
-      when: fs_units is defined and (dcv_service_unit == "" or dcv_service_unit is not defined)
-
-    - name: Final normalized unit name (strip whitespace)
-      ansible.builtin.set_fact:
-        dcv_service_unit: "{{ dcv_service_unit | default('') | trim }}"
-
-    - name: Debug chosen DCV service unit
-      ansible.builtin.debug:
-        msg: "Chosen DCV service unit = '{{ dcv_service_unit }}'"
-
-    - name: If service unit found -> enable & start it
-      ansible.builtin.systemd:
-        name: "{{ dcv_service_unit }}"
+    - name: Enable and start DCV service
+      systemd:
+        name: "{{ dcv_service.stdout }}"
         enabled: yes
         state: started
-        daemon_reload: yes
-      when: dcv_service_unit != ''
 
-    - name: If no service unit found, gather more debug (dpkg list + journalctl -xe tail)
-      block:
-        - name: Show installed packages that mention dcv or nice
-          ansible.builtin.shell: "dpkg -l | egrep -i 'dcv|nice' || true"
-          register: dpkg_dcv
-          changed_when: false
-
-        - name: Show journalctl for any recent dcv messages (tail)
-          ansible.builtin.shell: "journalctl -u dcvserver --no-pager -n 200 || journalctl -n 200 | egrep -i 'dcv|nice' || true"
-          register: jnl
-          changed_when: false
-
-        - name: Show content of extraction dir (deep)
-          ansible.builtin.shell: "find {{ dcv_extract_dir }} -maxdepth 3 -type f -print || true"
-          register: find_files
-          changed_when: false
-
-        - name: Fail with helpful debug info
-          ansible.builtin.fail:
-            msg: |
-              Could not detect or start Amazon DCV service unit.
-              - DCV extraction dir: {{ dcv_extract_dir }}
-              - Archive URL: {{ dcv_archive_url }}
-              - dpkg output (matching dcv/nice): {{ dpkg_dcv.stdout_lines }}
-              - journal extract: {{ jnl.stdout_lines | default([]) | join('\\n') }}
-              - files in extraction dir: {{ find_files.stdout_lines | default([]) | join('\\n') }}
-      when: dcv_service_unit == ''
-
-    - name: Ensure DCV port allowed via ufw (best-effort)
-      block:
-        - ansible.builtin.apt:
-            name: ufw
-            state: present
-        - ansible.builtin.ufw:
-            rule: allow
-            port: "{{ dcv_port }}"
-            proto: tcp
-      rescue:
-        - ansible.builtin.debug:
-            msg: "ufw not configured or missing; ensure SG allows {{ dcv_port }}/tcp"
-
-    - name: Install extra requested tools (if any)
-      ansible.builtin.apt:
-        name: "{{ tools_to_install | default([]) }}"
+    - name: Install extra requested tools
+      apt:
+        name: "{{ tools_to_install }}"
         state: present
       when: tools_to_install | length > 0
 
     - name: Print DCV connection info
-      ansible.builtin.debug:
-        msg: |
-          If DCV service started, connect to:
-          https://{{ ansible_default_ipv4.address }}:{{ dcv_port }}
+      debug:
+        msg: "DCV Server ready: https://{{ ansible_default_ipv4.address }}:{{ dcv_port }}"
 
