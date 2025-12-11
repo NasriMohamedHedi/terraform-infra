@@ -26,6 +26,12 @@
           - ubuntu-mate-desktop
         state: present
 
+    - name: Create DCV extraction directory
+      file:
+        path: "/tmp/dcv"
+        state: directory
+        mode: '0755'
+
     - name: Download DCV Server package
       get_url:
         url: "{{ dcv_url }}"
@@ -41,7 +47,7 @@
     - name: Install all DCV .deb packages
       shell: |
         cd /tmp/dcv
-        apt install -y ./*.deb
+        apt install -y ./*.deb || true
       args:
         executable: /bin/bash
 
@@ -57,13 +63,13 @@
         port: 8443
         proto: tcp
 
-    - name: Enable user for DCV session
+    - name: Configure DCV session & desktop
       copy:
         dest: /etc/dcv/dcv.conf
         content: |
           [security]
           authentication="system"
-          
+
           [session-management]
           create-session=1
           default-desktop-env=mate
