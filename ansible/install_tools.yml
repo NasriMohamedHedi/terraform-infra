@@ -1,94 +1,220 @@
 ---
-- name: Install tools and NICE DCV on Ubuntu
+- name: Install XFCE Desktop + Amazon DCV Server + requested tools
   hosts: all
   become: yes
-
   vars:
+    # <-- REPLACE this with the exact long-lived *Server* download link you copy from https://www.amazondcv.com
+    # Examples: a .deb URL OR a .tgz URL. Put your final URL here and commit to your repo.
+    dcv_download_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2025.0/Servers/nice-dcv-2025.0-20103-ubuntu2204-x86_64.tgz"
+
+    # local paths on remote host for download/extract
+    dcv_tmp_file: "/tmp/dcv_package"
+    dcv_extract_dir: "/tmp/dcv_extract"
+
+    # extra tools you want installed (kept empty by default)
     tools_to_install: []
-    dcv_package_url: "https://d1uj6qtbmh3dt5.cloudfront.net/2024.0/Servers/Ubuntu2204/x86_64/nice-dcv-server_2024.0-19030-1_ubuntu2204_amd64.deb"
-    dcv_package_name: "/tmp/nice-dcv-server.deb"
+
+    # DCV listen port (default 8443)
+    dcv_port: 8443
 
   tasks:
 
-    - name: Update apt cache
-      apt:
-        update_cache: yes
+  - name: Gather facts
+    ansible.builtin.setup:
 
-    - name: Install requested tools
-      apt:
-        name: "{{ tools_to_install }}"
-        state: present
-      when: tools_to_install | length > 0
+  - name: Show detected OS
+    ansible.builtin.debug:
+      msg: "Detected {{ ansible_distribution }} {{ ansible_distribution_version }} (family={{ ansible_os_family }})"
 
-    ####################################################################
-    # NICE DCV Installation
-    ####################################################################
+  - name: Ensure apt cache is updated
+    ansible.builtin.apt:
+      update_cache: yes
+      cache_valid_time: 3600
 
-    - name: Install DCV dependencies
-      apt:
-        name:
-          - python3
-          - python3-pip
-          - make
-          - gcc
-          - g++
-          - linux-headers-{{ ansible_kernel }}
-          - pulseaudio
-        state: present
-      ignore_errors: yes
+  - name: Install base utilities
+    ansible.builtin.apt:
+      name:
+        - curl
+        - wget
+        - jq
+        - ca-certificates
+        - apt-transport-https
+        - lsb-release
+        - gnupg
+        - tar
+        - unzip
+      state: present
 
-    - name: Download DCV package
-      get_url:
-        url: "{{ dcv_package_url }}"
-        dest: "{{ dcv_package_name }}"
-        mode: '0644'
+  - name: Install XFCE minimal desktop and X server (lightweight)
+    ansible.builtin.apt:
+      name:
+        - xfce4
+        - xfce4-terminal
+        - xorg
+        - dbus-x11
+        - policykit-1
+        - pulseaudio
+        - fonts-dejavu-core
+      state: present
+      update_cache: yes
 
-    - name: Install NICE DCV server
-      apt:
-        deb: "{{ dcv_package_name }}"
-      ignore_errors: yes
+  - name: Install LightDM (display manager)
+    ansible.builtin.apt:
+      name: lightdm
+      state: present
 
-    ####################################################################
-    # DCV Verification
-    ####################################################################
+  - name: Install DCV runtime dependencies
+    ansible.builtin.apt:
+      name:
+        - libgl1
+        - libxcb-icccm4
+        - libxcb-image0
+        - libxcb-keysyms1
+        - libxcb-randr0
+        - libxcb-render-util0
+        - libxcb-xinerama0
+        - pulseaudio
+      state: present
+    register: dcv_deps
+    failed_when: false
 
-    - name: Verify DCV package installation
-      command: dpkg -l | grep dcv
-      register: dcv_check
-      failed_when: false
+  - name: Fail early if dcv_download_url is empty (user must set it in playbook)
+    ansible.builtin.fail:
+      msg: >-
+        dcv_download_url is empty. Edit ansible/install_tools.yml and set the exact long-lived
+        Amazon DCV *Server* download URL for Ubuntu 22.04 (copy it from https://www.amazondcv.com).
+    when: dcv_download_url | default('') | trim == ''
 
-    - name: Print DCV verification output
-      debug:
-        msg: "{{ dcv_check.stdout_lines }}"
+  - name: Normalize filename and extension facts
+    ansible.builtin.set_fact:
+      dcv_filename: "{{ (dcv_download_url.split('/') | last) | default('dcv.pkg') }}"
+      dcv_ext: "{{ (dcv_filename | regex_search('\\.([^.]+)$') | default('')) }}"
 
-    ####################################################################
-    # Enable and start DCV services
-    ####################################################################
+  - name: Debug DCV URL being used
+    ansible.builtin.debug:
+      msg: "Installing DCV from {{ dcv_download_url }} (filename={{ dcv_filename }}, ext={{ dcv_ext }})"
 
-    - name: Enable and start dcvserver service
-      systemd:
-        name: dcvserver
-        state: started
-        enabled: yes
-      ignore_errors: yes
+  - name: Ensure /tmp extraction directory exists (clean)
+    ansible.builtin.file:
+      path: "{{ dcv_extract_dir }}"
+      state: directory
+      mode: "0755"
 
-    - name: Enable and start dcvagent service
-      systemd:
-        name: dcvagent
-        state: started
-        enabled: yes
-      ignore_errors: yes
+  - name: Download DCV package to /tmp
+    ansible.builtin.get_url:
+      url: "{{ dcv_download_url }}"
+      dest: "{{ dcv_tmp_file }}{{ '.' + dcv_ext if dcv_ext != '' else '' }}"
+      mode: "0644"
+      validate_certs: yes
+    register: download_res
+    retries: 2
+    delay: 5
+    until: download_res is succeeded
 
-    ####################################################################
-    # Final confirmation
-    ####################################################################
+  - name: If downloaded file is a .deb -> install directly
+    when: dcv_tmp_file + '.' + dcv_ext is defined and dcv_ext in ['deb']
+    block:
+      - name: Install .deb via apt
+        ansible.builtin.apt:
+          deb: "{{ dcv_tmp_file }}.{{ dcv_ext }}"
+          state: present
 
-    - name: Show DCV service status
-      command: systemctl status dcvserver
-      register: dcv_status
-      ignore_errors: yes
+  - name: If downloaded file is a .tgz/.tar.gz -> extract and install any .deb inside
+    when: dcv_ext in ['tgz','gz','tar','tar.gz']
+    block:
+      - name: Ensure extraction directory is empty
+        ansible.builtin.file:
+          path: "{{ dcv_extract_dir }}"
+          state: directory
+          mode: "0755"
+          recurse: yes
 
-    - name: Print DCV service status
-      debug:
-        msg: "{{ dcv_status.stdout_lines }}"
+      - name: Extract archive to extraction dir
+        ansible.builtin.unarchive:
+          src: "{{ dcv_tmp_file }}.{{ dcv_ext }}"
+          dest: "{{ dcv_extract_dir }}"
+          remote_src: yes
+
+      - name: Find .deb packages inside extracted directory
+        ansible.builtin.find:
+          paths: "{{ dcv_extract_dir }}"
+          patterns: "*.deb"
+          recurse: yes
+        register: found_debs
+
+      - name: Fail if no .deb found inside the extracted DCV archive
+        ansible.builtin.fail:
+          msg: "No .deb files found inside the DCV archive. Inspect {{ dcv_extract_dir }} on the host."
+        when: found_debs.matched == 0
+
+      - name: Install all found .deb packages (dpkg then fix deps)
+        ansible.builtin.shell: |
+          set -e
+          for f in {{ found_debs.files | map(attribute='path') | join(' ') | default('') }}; do
+            dpkg -i "$f" || true
+          done
+          apt-get -f -y install
+        args:
+          warn: false
+
+  - name: Attempt to reload systemd daemon (safe)
+    ansible.builtin.systemd:
+      daemon_reload: yes
+    failed_when: false
+
+  - name: Try to enable & start dcvserver (if the unit exists)
+    block:
+      - name: Check if dcvserver service file exists
+        ansible.builtin.stat:
+          path: /lib/systemd/system/dcvserver.service
+        register: dcvserver_service
+
+      - name: Enable and start dcvserver service
+        ansible.builtin.systemd:
+          name: dcvserver
+          enabled: yes
+          state: started
+        when: dcvserver_service.stat.exists
+    rescue:
+      - ansible.builtin.debug:
+          msg: "dcvserver service not found after install. Check installation logs on the host."
+
+  - name: Add ubuntu user to video group (if present)
+    ansible.builtin.user:
+      name: ubuntu
+      groups: video
+      append: yes
+    when: "'ubuntu' in ansible_facts['passwd']"
+
+  - name: Try to allow DCV port via ufw (optional)
+    block:
+      - name: Ensure ufw installed
+        ansible.builtin.apt:
+          name: ufw
+          state: present
+
+      - name: Allow DCV port on ufw
+        ansible.builtin.ufw:
+          rule: allow
+          port: "{{ dcv_port }}"
+          proto: tcp
+    rescue:
+      - ansible.builtin.debug:
+          msg: "ufw not available or not configured; ensure AWS Security Group allows inbound {{ dcv_port }}/tcp"
+
+  - name: Install extra requested tools (if any)
+    ansible.builtin.apt:
+      name: "{{ tools_to_install | default([]) }}"
+      state: present
+    when: tools_to_install | length > 0
+
+  - name: Print DCV connection info
+    ansible.builtin.debug:
+      msg: |
+        Amazon DCV install attempted.
+        If DCV service started successfully connect via:
+          https://{{ ansible_default_ipv4.address }}:{{ dcv_port }}
+        If service not found or not running:
+          - SSH to host and inspect /var/log/apt/ or /var/log/syslog and the extraction dir {{ dcv_extract_dir }}.
+          - Check which .deb files were present and installed: `ls -l {{ dcv_extract_dir }}`
 
