@@ -40,12 +40,18 @@ resource "aws_instance" "this" {
     lookup(each.value, "tags", {})
   )
 
- user_data = <<-EOT
+user_data = <<-EOT
 #cloud-config
 
 # -------------------------
-# 1️⃣ Set ubuntu password
+# 1️⃣ Enable password login for ubuntu
 # -------------------------
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+
 chpasswd:
   list: |
     ubuntu:ubuntu
@@ -54,7 +60,7 @@ chpasswd:
 ssh_pwauth: true
 
 # -------------------------
-# 2️⃣ SSH authorized_keys (for Ansible)
+# 2️⃣ SSH key for Ansible
 # -------------------------
 write_files:
   - path: /home/ubuntu/.ssh/authorized_keys
@@ -64,7 +70,7 @@ write_files:
 ${replace(var.public_key, "\n", "\n      ")}
 
   # -------------------------
-  # 3️⃣ systemd unit to auto-create DCV session
+  # 3️⃣ DCV auto-session service
   # -------------------------
   - path: /etc/systemd/system/dcv-session.service
     owner: root:root
@@ -84,25 +90,23 @@ ${replace(var.public_key, "\n", "\n      ")}
       WantedBy=multi-user.target
 
 # -------------------------
-# 4️⃣ Run commands on first boot
+# 4️⃣ First boot commands
 # -------------------------
 runcmd:
-  # SSH setup (for safety)
   - mkdir -p /home/ubuntu/.ssh
   - chown -R ubuntu:ubuntu /home/ubuntu/.ssh
   - chmod 700 /home/ubuntu/.ssh
+
   - systemctl enable ssh --now
 
-  # DCV session auto-create
   - systemctl daemon-reload
   - systemctl enable --now dcv-session.service
 
-  # Fallback direct session creation
+  # Safety net (DCV is sometimes slow)
   - /usr/bin/dcv create-session desktop --owner ubuntu || true
 
-  # Give the instance time to settle before Ansible
+  # Give time before Ansible
   - sleep 180
-
 EOT
 
 
