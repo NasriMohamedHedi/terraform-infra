@@ -40,15 +40,71 @@ resource "aws_instance" "this" {
     lookup(each.value, "tags", {})
   )
 
-  user_data = <<-EOT
-    #!/bin/bash
-    mkdir -p /home/ubuntu/.ssh
-    echo "${var.public_key}" > /home/ubuntu/.ssh/authorized_keys
-    chmod 600 /home/ubuntu/.ssh/authorized_keys
-    chown ubuntu:ubuntu /home/ubuntu/.ssh -R
-    systemctl enable ssh --now
-    sleep 180
-  EOT
+ user_data = <<-EOT
+#cloud-config
+
+# -------------------------
+# 1️⃣ Set ubuntu password
+# -------------------------
+chpasswd:
+  list: |
+    ubuntu:ubuntu
+  expire: False
+
+ssh_pwauth: true
+
+# -------------------------
+# 2️⃣ SSH authorized_keys (for Ansible)
+# -------------------------
+write_files:
+  - path: /home/ubuntu/.ssh/authorized_keys
+    owner: ubuntu:ubuntu
+    permissions: '0600'
+    content: |
+${replace(var.public_key, "\n", "\n      ")}
+
+  # -------------------------
+  # 3️⃣ systemd unit to auto-create DCV session
+  # -------------------------
+  - path: /etc/systemd/system/dcv-session.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Create Amazon DCV desktop session
+      After=dcvserver.service
+      Requires=dcvserver.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/dcv create-session desktop --owner ubuntu || true
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+# -------------------------
+# 4️⃣ Run commands on first boot
+# -------------------------
+runcmd:
+  # SSH setup (for safety)
+  - mkdir -p /home/ubuntu/.ssh
+  - chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+  - chmod 700 /home/ubuntu/.ssh
+  - systemctl enable ssh --now
+
+  # DCV session auto-create
+  - systemctl daemon-reload
+  - systemctl enable --now dcv-session.service
+
+  # Fallback direct session creation
+  - /usr/bin/dcv create-session desktop --owner ubuntu || true
+
+  # Give the instance time to settle before Ansible
+  - sleep 180
+
+EOT
+
 
   lifecycle { ignore_changes = [user_data] }
 }
