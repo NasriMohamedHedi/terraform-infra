@@ -9,7 +9,7 @@
         "collect_list": [
           {
             "file_path": "/var/log/syslog",
-            "log_group_name": "ec2-syslog",
+            "log_group_name": "/ec2/syslog",
             "log_stream_name": "{instance_id}"
           }
         ]
@@ -17,21 +17,24 @@
     }
   },
   "metrics": {
+    "namespace": "EC2/GoldenAMI",
     "append_dimensions": {
-      "InstanceId": "${aws:InstanceId}"
+      "InstanceId": "${aws:InstanceId}",
+      "InstanceType": "${aws:InstanceType}"
     },
     "metrics_collected": {
       "cpu": {
         "measurement": ["cpu_usage_idle", "cpu_usage_iowait"],
         "metrics_collection_interval": 60
       },
+      "mem": {
+        "measurement": ["mem_used_percent"]
+      },
       "disk": {
         "measurement": ["used_percent"],
         "resources": ["*"]
-      },
-      "mem": {
-        "measurement": ["mem_used_percent"]
       }
     }
   }
 }
+

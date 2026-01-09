@@ -11,15 +11,40 @@
   - name: Gather facts
     ansible.builtin.setup:
 
-  - name: Show tools to install
-    ansible.builtin.debug:
-      msg: "Tools requested: {{ tools_to_install | default([]) }}"
-
-  - name: Ensure apt cache is up to date
+  # ----------------------------
+  # CloudWatch Agent
+  # ----------------------------
+  - name: Install CloudWatch Agent
     ansible.builtin.apt:
+      name: amazon-cloudwatch-agent
+      state: present
       update_cache: yes
-      cache_valid_time: 3600
 
+  - name: Create CloudWatch Agent config directory
+    ansible.builtin.file:
+      path: /opt/aws/amazon-cloudwatch-agent/etc
+      state: directory
+      mode: '0755'
+
+  - name: Deploy CloudWatch Agent config
+    ansible.builtin.template:
+      src: amazon-cloudwatch-agent.j2
+      dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+      owner: root
+      group: root
+      mode: '0644'
+
+  - name: Enable and start CloudWatch Agent
+    ansible.builtin.command: >
+      /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+      -a fetch-config
+      -m ec2
+      -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+      -s
+
+  # ----------------------------
+  # Extra tools
+  # ----------------------------
   - name: Install requested tools
     ansible.builtin.apt:
       name: "{{ tools_to_install }}"
@@ -30,5 +55,5 @@
     ansible.builtin.debug:
       msg: |
         EC2 configuration finished.
-        Golden AMI assumed (desktop & DCV already installed).
+        CloudWatch Agent is running.
 
