@@ -4,29 +4,45 @@ resource "aws_cloudwatch_dashboard" "ec2_dashboard" {
   dashboard_body = jsonencode({
     widgets = [
       {
-        type = "metric",
-        width = 12,
-        height = 6,
+        type = "metric"
+        x    = 0
+        y    = 0
+        width  = 12
+        height = 6
+
         properties = {
+          region = "eu-central-1"
+          view   = "timeSeries"
+          title  = "EC2 CPU Utilization"
+          stat   = "Average"
+          period = 300
+
           metrics = [
-            [ "EC2/GoldenAMI", "cpu_usage_idle", "InstanceId", "*" ]
-          ],
-          period = 300,
-          stat = "Average",
-          title = "CPU Idle (%)"
+            [ "AWS/EC2", "CPUUtilization", "InstanceId", "*" ]
+          ]
+
+          annotations = {}
         }
       },
       {
-        type = "metric",
-        width = 12,
-        height = 6,
+        type = "metric"
+        x    = 12
+        y    = 0
+        width  = 12
+        height = 6
+
         properties = {
+          region = "eu-central-1"
+          view   = "timeSeries"
+          title  = "EC2 Network In"
+          stat   = "Sum"
+          period = 300
+
           metrics = [
-            [ "EC2/GoldenAMI", "mem_used_percent", "InstanceId", "*" ]
-          ],
-          period = 300,
-          stat = "Average",
-          title = "Memory Used (%)"
+            [ "AWS/EC2", "NetworkIn", "InstanceId", "*" ]
+          ]
+
+          annotations = {}
         }
       }
     ]
