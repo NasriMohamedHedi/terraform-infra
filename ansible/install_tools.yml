@@ -5,46 +5,107 @@
 
   vars:
     tools_to_install: []
+    cloudwatch_agent_deb_url: "https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb"
+    cloudwatch_agent_local: "/tmp/amazon-cloudwatch-agent.deb"
+    cloudwatch_agent_conf_dest: "/etc/amazon-cloudwatch-agent.json"
 
   tasks:
 
   - name: Gather facts
     ansible.builtin.setup:
 
-  # ----------------------------
-  # CloudWatch Agent
-  # ----------------------------
-  - name: Install CloudWatch Agent
+  - name: Show tools to install
+    ansible.builtin.debug:
+      msg: "Tools requested: {{ tools_to_install | default([]) }}"
+
+  - name: Ensure apt cache is up to date
     ansible.builtin.apt:
-      name: amazon-cloudwatch-agent
-      state: present
       update_cache: yes
+      cache_valid_time: 3600
 
-  - name: Create CloudWatch Agent config directory
-    ansible.builtin.file:
-      path: /opt/aws/amazon-cloudwatch-agent/etc
-      state: directory
-      mode: '0755'
+  - name: Install base utilities (wget, curl, jq)
+    ansible.builtin.apt:
+      name:
+        - wget
+        - curl
+        - jq
+        - ca-certificates
+        - apt-transport-https
+        - lsb-release
+        - gnupg
+      state: present
 
-  - name: Deploy CloudWatch Agent config
+  ####################################################################
+  # Install Amazon CloudWatch Agent (deb) - idempotent
+  ####################################################################
+  - name: Check if CloudWatch agent binary exists
+    ansible.builtin.stat:
+      path: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+    register: cw_agent_bin
+
+  - name: Download amazon-cloudwatch-agent.deb (only if not present)
+    ansible.builtin.get_url:
+      url: "{{ cloudwatch_agent_deb_url }}"
+      dest: "{{ cloudwatch_agent_local }}"
+      mode: "0644"
+    when: not cw_agent_bin.stat.exists
+
+  - name: Install amazon-cloudwatch-agent (dpkg)
+    ansible.builtin.command:
+      cmd: "dpkg -i {{ cloudwatch_agent_local }}"
+    register: dpkg_res
+    changed_when: dpkg_res.rc == 0
+    failed_when: dpkg_res.rc not in [0,1]
+    when: not cw_agent_bin.stat.exists
+    ignore_errors: true
+
+  - name: Fix missing deps after dpkg (apt-get -f install)
+    ansible.builtin.apt:
+      update_cache: yes
+      fix_broken: yes
+      state: present
+    when: not cw_agent_bin.stat.exists
+
+  - name: Verify cloudwatch agent installed (stat again)
+    ansible.builtin.stat:
+      path: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+    register: cw_agent_installed
+
+  - name: Fail early if agent not installed
+    ansible.builtin.fail:
+      msg: "CloudWatch agent installation failed or binary missing. See previous logs."
+    when: not cw_agent_installed.stat.exists
+
+  - name: Deploy CloudWatch agent configuration from template
     ansible.builtin.template:
-      src: amazon-cloudwatch-agent.j2
-      dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+      src: "amazon-cloudwatch-agent.j2"
+      dest: "{{ cloudwatch_agent_conf_dest }}"
       owner: root
       group: root
       mode: '0644'
 
-  - name: Enable and start CloudWatch Agent
-    ansible.builtin.command: >
-      /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
-      -a fetch-config
-      -m ec2
-      -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-      -s
+  - name: Start/Restart CloudWatch agent with the config
+    ansible.builtin.command:
+      cmd: "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop || true; /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a start -m ec2 -c file:{{ cloudwatch_agent_conf_dest }}"
+    register: cw_ctl
+    changed_when: "'started' in cw_ctl.stdout.lower() or cw_ctl.rc == 0"
 
-  # ----------------------------
-  # Extra tools
-  # ----------------------------
+  - name: Wait for CloudWatch agent to show running
+    ansible.builtin.command:
+      cmd: "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -m ec2 -a status"
+    register: cw_status
+    retries: 5
+    delay: 6
+    until: cw_status.stdout is search("running") or cw_status.rc == 0
+    failed_when: cw_status.rc != 0 and ('running' not in cw_status.stdout.lower())
+
+  - name: Show CloudWatch agent status (debug)
+    ansible.builtin.debug:
+      msg: "{{ cw_status.stdout | default('no status output') }}"
+
+  ####################################################################
+  # Install requested tools
+  ####################################################################
   - name: Install requested tools
     ansible.builtin.apt:
       name: "{{ tools_to_install }}"
@@ -55,5 +116,5 @@
     ansible.builtin.debug:
       msg: |
         EC2 configuration finished.
-        CloudWatch Agent is running.
+        Golden AMI assumed (desktop & DCV already installed).
 
