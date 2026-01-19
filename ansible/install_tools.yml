@@ -64,7 +64,6 @@
       cmd: apt-get -f -y install
     register: apt_fix
     changed_when: "'Setting up' in apt_fix.stdout or apt_fix.rc == 0"
-	
 
   - name: Verify cloudwatch agent installed (stat again)
     ansible.builtin.stat:
@@ -117,4 +116,3 @@
       msg: |
         EC2 configuration finished.
         Golden AMI assumed (desktop & DCV already installed).
-
