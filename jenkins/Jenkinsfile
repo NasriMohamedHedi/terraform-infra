@@ -121,18 +121,24 @@ pipeline {
     }
 
     post {
-    success {
-        script {
-            echo "📐 Terraform apply successful → triggering diagram generation"
+  success {
+    script {
+      echo "📐 Terraform apply successful → triggering diagram generation"
 
-            build job: 'GenerateDiagram',
-              wait: false,
-              parameters: [
-                string(name: 'S3_BUCKET', value: "${params.BUCKET}"),
-                string(name: 'S3_KEY', value: "${env.S3_PAYLOAD_KEY}")
-              ]
-        }
+      build job: 'GenerateDiagram',
+        wait: false,
+        parameters: [
+          string(
+            name: 'S3_BUCKET',
+            value: params.BUCKET
+          ),
+          string(
+            name: 'S3_KEY',
+            value: env.S3_PAYLOAD_KEY
+          )
+        ]
     }
+  }
 }
 }
 
