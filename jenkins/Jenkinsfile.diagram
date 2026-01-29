@@ -1,0 +1,88 @@
+pipeline {
+  agent any
+
+  parameters {
+    string(name: 'S3_BUCKET', description: 'S3 bucket that contains payload JSON')
+    string(name: 'S3_KEY', description: 'S3 key (object name) for payload JSON')
+  }
+
+  environment {
+    MERMAID_BIN = "/snap/bin/mmdc"
+    # If you need to instruct puppeteer to use a system chrome,
+    # ensure chromium is installed on the Jenkins node and set the path:
+    PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium-browser"
+    PUPPETEER_SKIP_DOWNLOAD = "true"
+  }
+
+  stages {
+
+    stage('Checkout repository') {
+      steps {
+        // Get diagrams/generate_mermaid.py from repo
+        checkout scm
+      }
+    }
+
+    stage('Prepare workspace') {
+      steps {
+        sh '''
+          rm -rf diagram-output || true
+          mkdir -p diagram-output
+        '''
+      }
+    }
+
+    stage('Download payload from S3') {
+      steps {
+        // Use AWS credentials configured in Jenkins as 'aws-terraform-creds'
+        withCredentials([[ $class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY' ]]) {
+          sh '''
+            echo "Downloading s3://${S3_BUCKET}/${S3_KEY}"
+            aws s3 cp "s3://${S3_BUCKET}/${S3_KEY}" diagram-output/payload.json
+            ls -l diagram-output || true
+            cat diagram-output/payload.json || true
+          '''
+        }
+      }
+    }
+
+    stage('Generate Mermaid .mmd') {
+      steps {
+        sh '''
+          python3 diagrams/generate_mermaid.py --payload diagram-output/payload.json --out diagram-output/lab.mmd
+          echo "Mermaid file content:"
+          sed -n '1,200p' diagram-output/lab.mmd || true
+        '''
+      }
+    }
+
+    stage('Render PNG / SVG') {
+      steps {
+        sh '''
+          if [ ! -x "${MERMAID_BIN}" ]; then
+            echo "ERROR: mermaid cli not found at ${MERMAID_BIN}"
+            exit 2
+          fi
+
+          # ensure puppeteer uses system chromium if configured
+          export PUPPETEER_EXECUTABLE_PATH=${PUPPETEER_EXECUTABLE_PATH}
+          export PUPPETEER_SKIP_DOWNLOAD=${PUPPETEER_SKIP_DOWNLOAD}
+
+          ${MERMAID_BIN} -i diagram-output/lab.mmd -o diagram-output/lab.png
+          ${MERMAID_BIN} -i diagram-output/lab.mmd -o diagram-output/lab.svg
+          ls -lh diagram-output || true
+        '''
+      }
+    }
+  }
+
+  post {
+    success {
+      archiveArtifacts artifacts: 'diagram-output/*', fingerprint: true
+      echo "✅ Diagram generated and archived"
+    }
+    failure {
+      echo "❌ Diagram generation failed — inspect console output"
+    }
+  }
+}

@@ -90,36 +90,51 @@ pipeline {
         }
 
         stage('Terraform Apply') {
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform-creds',
-                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-                ]]) {
-                    script {
-                        def payload = readJSON file: 'payload.json'
-                        echo "🚀 Applying Terraform for ${payload.service_type}"
+    steps {
+        withCredentials([[ 
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: 'aws-terraform-creds',
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+        ]]) {
+            script {
+                def payload = readJSON file: 'payload.json'
+                echo "🚀 Applying Terraform for ${payload.service_type}"
 
-                        sh """
-                            terraform apply \
-                              -var 's3_payload_bucket=${params.BUCKET}' \
-                              -var 's3_payload_key=${env.S3_PAYLOAD_KEY}' \
-                              -var 'aws_region=${AWS_DEFAULT_REGION}' \
-                              -auto-approve
-                        """
+                sh """
+                    terraform apply \
+                      -var 's3_payload_bucket=${params.BUCKET}' \
+                      -var 's3_payload_key=${env.S3_PAYLOAD_KEY}' \
+                      -var 'aws_region=${AWS_DEFAULT_REGION}' \
+                      -auto-approve
+                """
 
-                        if (payload.service_type == 'ec2') {
-                            sh """
-                                terraform output -raw private_key_pem > client-access-key.pem
-                                chmod 400 client-access-key.pem
-                            """
-                            archiveArtifacts artifacts: 'client-access-key.pem'
-                        }
-                    }
+                if (payload.service_type == 'ec2') {
+                    sh """
+                        terraform output -raw private_key_pem > client-access-key.pem
+                        chmod 400 client-access-key.pem
+                    """
+                    archiveArtifacts artifacts: 'client-access-key.pem'
                 }
             }
         }
+    }
+
+    post {
+    success {
+        script {
+            echo "📐 Terraform apply successful → triggering diagram generation"
+
+            build job: 'GenerateDiagram',
+              wait: false,
+              parameters: [
+                string(name: 'S3_BUCKET', value: "${params.BUCKET}"),
+                string(name: 'S3_KEY', value: "${env.S3_PAYLOAD_KEY}")
+              ]
+        }
+    }
+}
+}
 
 stage('Install Tools on EC2 (Ansible)') {
   when { expression { env.SERVICE_TYPE == 'ec2' } }
