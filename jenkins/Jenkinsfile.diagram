@@ -2,16 +2,13 @@ pipeline {
   agent any
 
   parameters {
-    string(name: 'S3_BUCKET', description: 'S3 bucket that contains payload JSON')
-    string(name: 'S3_KEY', description: 'S3 key (object name) for payload JSON')
+    string(name: 'S3_BUCKET', description: 'S3 bucket containing payload')
+    string(name: 'S3_KEY', description: 'S3 key of payload JSON')
   }
 
   environment {
-    MERMAID_BIN = "/snap/bin/mmdc"
-
-    // Tell mermaid/puppeteer to use system chromium (important for snap installs)
-    PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium-browser"
-    PUPPETEER_SKIP_DOWNLOAD = "true"
+    PUPPETEER_EXECUTABLE_PATH = '/usr/bin/chromium-browser'
+    PUPPETEER_SKIP_DOWNLOAD   = 'true'
   }
 
   stages {
@@ -25,7 +22,7 @@ pipeline {
     stage('Prepare workspace') {
       steps {
         sh '''
-          rm -rf diagram-output || true
+          rm -rf diagram-output
           mkdir -p diagram-output
         '''
       }
@@ -41,7 +38,7 @@ pipeline {
         ]]) {
           sh '''
             echo "⬇️ Downloading payload from s3://${S3_BUCKET}/${S3_KEY}"
-            aws s3 cp "s3://${S3_BUCKET}/${S3_KEY}" diagram-output/payload.json
+            aws s3 cp s3://${S3_BUCKET}/${S3_KEY} diagram-output/payload.json
             echo "📄 Payload content:"
             cat diagram-output/payload.json
           '''
@@ -65,18 +62,9 @@ pipeline {
     stage('Render Diagram (PNG + SVG)') {
       steps {
         sh '''
-          if [ ! -x "${MERMAID_BIN}" ]; then
-            echo "❌ Mermaid CLI not found at ${MERMAID_BIN}"
-            exit 2
-          fi
-
-          export PUPPETEER_EXECUTABLE_PATH=${PUPPETEER_EXECUTABLE_PATH}
-          export PUPPETEER_SKIP_DOWNLOAD=${PUPPETEER_SKIP_DOWNLOAD}
-
-          ${MERMAID_BIN} -i diagram-output/lab.mmd -o diagram-output/lab.png
-          ${MERMAID_BIN} -i diagram-output/lab.mmd -o diagram-output/lab.svg
-
-          ls -lh diagram-output
+          which mmdc
+          mmdc -i diagram-output/lab.mmd -o diagram-output/lab.png
+          mmdc -i diagram-output/lab.mmd -o diagram-output/lab.svg
         '''
       }
     }
@@ -85,7 +73,7 @@ pipeline {
   post {
     success {
       archiveArtifacts artifacts: 'diagram-output/*', fingerprint: true
-      echo "✅ Diagram generated and archived successfully"
+      echo "✅ Diagram generated successfully"
     }
     failure {
       echo "❌ Diagram generation failed"
