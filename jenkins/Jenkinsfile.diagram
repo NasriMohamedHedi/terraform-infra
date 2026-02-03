@@ -60,14 +60,25 @@ pipeline {
     }
 
     stage('Render Diagram (PNG + SVG)') {
-      steps {
-        sh '''
-          which mmdc
-          mmdc -i diagram-output/lab.mmd -o diagram-output/lab.png
-          mmdc -i diagram-output/lab.mmd -o diagram-output/lab.svg
-        '''
-      }
-    }
+  steps {
+    sh '''
+      set -e
+
+      echo "🔍 Debug"
+      which mmdc
+      ls -l /usr/local/bin/chrome-headless-wrapper
+
+      export PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chrome-headless-wrapper
+      export PUPPETEER_SKIP_DOWNLOAD=true
+
+      echo "🚀 Rendering PNG"
+      mmdc -i diagram-output/lab.mmd -o diagram-output/lab.png
+
+      echo "🚀 Rendering SVG"
+      mmdc -i diagram-output/lab.mmd -o diagram-output/lab.svg
+    '''
+  }
+}
   }
 
   post {
