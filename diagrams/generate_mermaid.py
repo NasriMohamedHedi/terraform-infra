@@ -2,66 +2,83 @@ import json
 import argparse
 from datetime import datetime, UTC
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--payload", required=True)
-parser.add_argument("--out", required=True)
-args = parser.parse_args()
+def header(lines):
+    lines.extend([
+        "flowchart TB",
+        "",
+        "Client[Client / API Request]",
+        "S3[S3 Payload Bucket]",
+        "J[Jenkins Pipeline]",
+        "TF[Terraform Apply]",
+        "ANS[Ansible Configuration]",
+        "",
+        "Client --> S3",
+        "S3 --> J",
+        "J --> TF",
+        "TF --> ANS",
+        ""
+    ])
 
-with open(args.payload) as f:
-    payload = json.load(f)
+def ec2_diagram(lines, payload):
+    lines.append("subgraph AWS_EC2 [AWS EC2 Lab]")
 
-lines = []
-lines.append("flowchart TB\n")
+    for key, inst in payload["instances"].items():
+        node_id = f"EC2_{key.replace('-', '_')}"
+        label = (
+            f"EC2 Instance<br/>"
+            f"<b>{inst.get('name')}</b><br/>"
+            f"Type: {inst.get('instance_type')}<br/>"
+            f"Subnet: {inst.get('subnet_id')}<br/>"
+            f"SGs: {', '.join(inst.get('security_groups', []))}"
+        )
 
-# Common pipeline
-lines += [
-    "API[API Gateway]",
-    "S3[S3 Payload Bucket]",
-    "J[Jenkins]",
-    "TF[Terraform]",
-    "ANS[Ansible]",
-    "API --> S3",
-    "S3 --> J",
-    "J --> TF",
-]
+        lines.append(f'{node_id}["{label}"]')
+        lines.append(f"ANS --> {node_id}")
 
-service = payload["service_type"]
+        # Tools
+        tools = inst.get("tools_to_install", [])
+        if tools:
+            tool_node = f"{node_id}_TOOLS"
+            lines.append(f'{tool_node}["Installed Tools<br/>{", ".join(tools)}"]')
+            lines.append(f"{node_id} --> {tool_node}")
 
-# =====================
-# EC2 DIAGRAM
-# =====================
-if service == "ec2":
-    lines.append("TF --> ANS")
-    lines.append("subgraph AWS_EC2 [EC2 Lab]")
-    lines.append(
-        f'EC2_VM["EC2: {payload.get("name","VM")}<br/>'
-        f'{payload.get("instance_type","t3.medium")}"]'
-    )
-    lines.append("ANS --> EC2_VM")
     lines.append("end")
+    lines.append("")
 
-# =====================
-# EKS DIAGRAM
-# =====================
-elif service == "eks":
-    lines.append("subgraph AWS_EKS [EKS Lab]")
-    lines.append(
-        f'EKS["EKS Cluster<br/>{payload.get("cluster_name","eks")}"]'
-    )
-    lines.append(
-        f'NODE["Worker Nodes<br/>{payload.get("node_type","t3.large")}"]'
-    )
-    lines.append("TF --> EKS")
-    lines.append("EKS --> NODE")
+def eks_diagram(lines, payload):
+    lines.append("subgraph AWS_EKS [AWS EKS Lab]")
+    lines.append('EKS["EKS Cluster"]')
+    lines.append("ANS --> EKS")
     lines.append("end")
+    lines.append("")
 
-# Footer
-lines.append(
-    f'NOTE["Generated {datetime.now(UTC).isoformat()}"]'
-)
+def footer(lines):
+    ts = datetime.now(UTC).isoformat()
+    lines.append(f'NOTE["Generated automatically<br/>{ts}"]')
 
-with open(args.out, "w") as f:
-    f.write("\n".join(lines))
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--payload", required=True)
+    parser.add_argument("--out", required=True)
+    args = parser.parse_args()
 
-print("[OK] Mermaid file generated")
+    with open(args.payload) as f:
+        payload = json.load(f)
 
+    lines = []
+    header(lines)
+
+    if payload["service_type"] == "ec2":
+        ec2_diagram(lines, payload)
+    elif payload["service_type"] == "eks":
+        eks_diagram(lines, payload)
+
+    footer(lines)
+
+    with open(args.out, "w") as f:
+        f.write("\n".join(lines))
+
+    print("[OK] Mermaid diagram generated")
+
+if __name__ == "__main__":
+    main()
