@@ -210,10 +210,10 @@ stage('Deploy Tools on EKS') {
         /* ===========================
            BASIC CONTEXT
         ============================ */
-        def payload       = readJSON file: 'payload.json'
-        def cluster_name  = payload.eks.cluster_name
-        def region        = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
-        def ecrRegistry   = "430118831270.dkr.ecr.${region}.amazonaws.com"
+        def payload        = readJSON file: 'payload.json'
+        def cluster_name   = payload.eks.cluster_name
+        def region         = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
+        def ecrRegistry    = "430118831270.dkr.ecr.${region}.amazonaws.com"
         def LOCAL_HELM_BASE = "/home/thesamurai/helm-charts"
 
         echo "☸ Deploying tools to EKS Cluster: ${cluster_name}"
@@ -230,21 +230,21 @@ stage('Deploy Tools on EKS') {
         env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
         /* ===========================
-           ECR LOGIN
-        ============================ */
-        sh """
-          aws ecr get-login-password --region ${region} \
-          | docker login --username AWS --password-stdin ${ecrRegistry}
-        """
-
-        /* ===========================
-           HELM REPOS (REMOTE ONLY)
+           ECR LOGIN (SAFE)
         ============================ */
         sh '''
-          helm repo add grafana https://grafana.github.io/helm-charts || true
-          helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
-          helm repo update || true
-        '''
+aws ecr get-login-password --region ''' + region + ''' \
+| docker login --username AWS --password-stdin ''' + ecrRegistry + '''
+'''
+
+        /* ===========================
+           HELM REPOS
+        ============================ */
+        sh '''
+helm repo add grafana https://grafana.github.io/helm-charts || true
+helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
+helm repo update || true
+'''
 
         /* ===========================
            NAMESPACES + ECR CREDS
@@ -259,21 +259,20 @@ stage('Deploy Tools on EKS') {
 
         namespaces.each { ns ->
           sh "kubectl get ns ${ns} >/dev/null 2>&1 || kubectl create ns ${ns}"
-
           sh "kubectl delete secret ecr-creds -n ${ns} --ignore-not-found || true"
 
-          sh """
-            kubectl create secret docker-registry ecr-creds \
-              --docker-server=${ecrRegistry} \
-              --docker-username=AWS \
-              --docker-password="$(aws ecr get-login-password --region ${region})" \
-              --namespace ${ns}
-          """
+          sh '''
+kubectl create secret docker-registry ecr-creds \
+  --docker-server=''' + ecrRegistry + ''' \
+  --docker-username=AWS \
+  --docker-password="$(aws ecr get-login-password --region ''' + region + ''')" \
+  --namespace ''' + ns
+'''
 
-          sh """
-            kubectl patch serviceaccount default -n ${ns} \
-              -p '{\"imagePullSecrets\":[{\"name\":\"ecr-creds\"}]}' || true
-          """
+          sh '''
+kubectl patch serviceaccount default -n ''' + ns + ''' \
+  -p '{"imagePullSecrets":[{"name":"ecr-creds"}]}' || true
+'''
         }
 
         /* ===========================
@@ -343,10 +342,10 @@ persistence:
 
               echo "✅ ${name} installed successfully"
 
-              sh """
-                kubectl rollout status deploy/${name} \
-                  -n ${namespace} --timeout=180s || true
-              """
+              sh '''
+kubectl rollout status deploy/''' + name + ''' \
+  -n ''' + namespace + ''' --timeout=180s || true
+'''
               break
             }
             catch (err) {
@@ -367,7 +366,6 @@ persistence:
     }
   }
 }
-
 
                stage('Send Kubeconfig via Email') {
             when { expression { env.SERVICE_TYPE == 'eks' } }
