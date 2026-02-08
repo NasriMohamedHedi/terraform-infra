@@ -214,7 +214,7 @@ stage('Deploy Tools on EKS') {
         def cluster_name   = payload.eks.cluster_name
         def region         = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
         def ecrRegistry    = "430118831270.dkr.ecr.${region}.amazonaws.com"
-        def LOCAL_HELM_BASE = "/home/thesamurai/helm-charts"
+        def LOCAL_HELM_BASE = "${WORKSPACE}/helm"
 
         echo "☸ Deploying tools to EKS Cluster: ${cluster_name}"
 
