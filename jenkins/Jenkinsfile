@@ -214,9 +214,9 @@ stage('Deploy Tools on EKS') {
         def cluster_name   = payload.eks.cluster_name
         def region         = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
         def ecrRegistry    = "430118831270.dkr.ecr.${region}.amazonaws.com"
-        def LOCAL_HELM_BASE = "${WORKSPACE}/helm"
+        def HELM_BASE      = "${WORKSPACE}/helm"
 
-        echo "☸ Deploying tools to EKS Cluster: ${cluster_name}"
+        echo "☸ Deploying to EKS cluster: ${cluster_name}"
 
         /* ===========================
            KUBECONFIG
@@ -238,20 +238,42 @@ aws ecr get-login-password --region ${region} \
 """
 
         /* ===========================
-           HELM REPOS
+           AWS LOAD BALANCER CONTROLLER
         ============================ */
-        sh '''
-helm repo add grafana https://grafana.github.io/helm-charts || true
-helm repo add prometheus https://prometheus-community.github.io/helm-charts || true
+        sh """
+helm repo add eks https://aws.github.io/eks-charts || true
 helm repo update || true
-'''
+
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --set clusterName=${cluster_name} \
+  --set serviceAccount.create=true \
+  --set region=${region} \
+  --set v=2
+"""
+
+        /* ===========================
+           MONITORING STACK
+        ============================ */
+        sh """
+helm upgrade --install monitoring ${HELM_BASE}/monitoring \
+  -n monitoring \
+  --create-namespace \
+  --timeout 15m
+"""
+
+        sh """
+kubectl rollout status deployment/monitoring-grafana \
+  -n monitoring --timeout=300s
+"""
 
         /* ===========================
            NAMESPACES + ECR CREDS
         ============================ */
         def tools = payload.eks.tools_to_install ?: []
+
         if (tools.isEmpty()) {
-          echo "ℹ️ No tools to deploy"
+          echo "ℹ️ No EKS tools to deploy"
           return
         }
 
@@ -277,22 +299,18 @@ kubectl patch serviceaccount default -n ${ns} \
         }
 
         /* ===========================
-           INSTALL EACH TOOL
+           DEPLOY EACH TOOL
         ============================ */
         tools.each { t ->
 
           def name      = t.name
           def namespace = t.namespace ?: "default"
           def chart     = t.chart
-          def repo      = t.chart_repo ?: ""
           def tag       = t.image_tag ?: "latest"
           def ecrUrl    = t.ecr_repo_url ?: "${ecrRegistry}/${name}"
 
-          echo "📦 Deploying ${name} → chart=${chart}, ns=${namespace}"
+          echo "📦 Deploying tool: ${name}"
 
-          /* ===========================
-             VALUES FILE
-          ============================ */
           def valuesFile = "values-${name}.yaml"
           writeFile file: valuesFile, text: """
 image:
@@ -306,75 +324,76 @@ serviceAccount:
   create: true
   imagePullSecrets:
     - name: ecr-creds
-
-persistence:
-  enabled: false
 """
 
-          /* ===========================
-             CHART RESOLUTION
-          ============================ */
-          def localChartPath = "${LOCAL_HELM_BASE}/${chart}"
-          def helmCmd
+          def chartPath = "${HELM_BASE}/${chart}"
 
-          if (fileExists(localChartPath)) {
-            echo "📁 Using LOCAL chart: ${localChartPath}"
-            helmCmd = "helm upgrade --install ${name} ${localChartPath}"
-          } else if (repo.startsWith("http")) {
-            echo "🌐 Using REMOTE chart: ${chart}"
-            helmCmd = "helm upgrade --install ${name} ${chart} --repo ${repo}"
-          } else {
-            error("❌ Chart ${chart} not found")
+          if (!fileExists(chartPath)) {
+            error "❌ Helm chart not found: ${chartPath}"
           }
 
-          helmCmd += " --namespace ${namespace} --create-namespace"
-          helmCmd += " -f ${valuesFile} --debug --timeout 30m"
-          helmCmd += " --set image.repository=${ecrUrl} --set image.tag=${tag}"
-
-          /* ===========================
-             INSTALL WITH RETRIES
-          ============================ */
           retry(3) {
-            sh helmCmd
+            sh """
+helm upgrade --install ${name} ${chartPath} \
+  -n ${namespace} \
+  --create-namespace \
+  -f ${valuesFile} \
+  --timeout 20m
+"""
           }
 
           sh """
 kubectl rollout status deployment/${name} \
-  -n ${namespace} --timeout=180s || true
+  -n ${namespace} --timeout=300s || true
 """
         }
 
-        echo "✅ All EKS tools deployed successfully"
+        /* ===========================
+           DASHBOARD URL
+        ============================ */
+        env.DASHBOARD_URL = "https://dashboard.${cluster_name}.thesamurai.com"
+        echo "🌍 Dashboard URL: ${env.DASHBOARD_URL}"
+
+        echo "✅ EKS deployment completed successfully"
       }
     }
   }
 }
-               stage('Send Kubeconfig via Email') {
-            when { expression { env.SERVICE_TYPE == 'eks' } }
-            steps {
-                script {
-                    def payload = readJSON file: 'payload.json'
-                    emailext(
-                        to: payload.client_email,
-                        subject: "EKS Cluster Access: ${payload.eks.cluster_name}",
-                        body: """
+
+
+
+stage('Send EKS Dashboard Access') {
+  when { expression { env.SERVICE_TYPE == 'eks' } }
+  steps {
+    script {
+      def payload = readJSON file: 'payload.json'
+
+      emailext(
+        to: payload.client_email,
+        subject: "🛡 Your EKS Security Dashboard is Ready",
+        body: """
 Hello ${payload.user_name},
 
-Your EKS cluster "${payload.eks.cluster_name}" is ready.
+Your EKS lab "${payload.eks.cluster_name}" is ready 🚀
 
-Save the attached kubeconfig file and run:
-export KUBECONFIG=kubeconfig.yaml
-kubectl get nodes
+🔗 Access your live dashboards here:
+${env.DASHBOARD_URL}
 
-Regards,  
+What you can see:
+• Cluster health
+• Pods & namespaces
+• Security tools metrics
+• Real-time monitoring
+
+No kubectl, no SSH required.
+
+Regards,
 Samurai DevOps Team
-                        """,
-                        attachmentsPattern: 'kubeconfig.yaml',
-                        mimeType: 'text/plain'
-                    )
-                }
-            }
-        }
+"""
+      )
+    }
+  }
+}
 
         stage('Send EC2 SSH Credentials') {
             when { expression { env.SERVICE_TYPE == 'ec2' } }
