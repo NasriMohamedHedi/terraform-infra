@@ -208,15 +208,15 @@ stage('Deploy Tools on EKS') {
       script {
 
         /* ===========================
-           BASIC CONTEXT
+           CONTEXT
         ============================ */
-        def payload        = readJSON file: 'payload.json'
-        def cluster_name   = payload.eks.cluster_name
-        def region         = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
-        def ecrRegistry    = "430118831270.dkr.ecr.${region}.amazonaws.com"
-        def HELM_BASE      = "${WORKSPACE}/helm"
+        def payload      = readJSON file: 'payload.json'
+        def clusterName  = payload.eks.cluster_name
+        def region       = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
+        def ecrRegistry  = "430118831270.dkr.ecr.${region}.amazonaws.com"
+        def HELM_BASE    = "${WORKSPACE}/helm"
 
-        echo "☸ Deploying to EKS cluster: ${cluster_name}"
+        echo "☸ Deploying to EKS cluster: ${clusterName}"
 
         /* ===========================
            KUBECONFIG
@@ -242,29 +242,41 @@ aws ecr get-login-password --region ${region} \
         ============================ */
         sh """
 helm repo add eks https://aws.github.io/eks-charts || true
-helm repo update || true
+helm repo update
 
 helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
   -n kube-system \
-  --set clusterName=${cluster_name} \
+  --set clusterName=${clusterName} \
   --set serviceAccount.create=true \
   --set region=${region} \
   --set v=2
 """
 
         /* ===========================
-           MONITORING STACK
+           KUBERNETES DASHBOARD
+        ============================ */
+        sh """
+helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/ || true
+helm repo update
+
+helm upgrade --install kubernetes-dashboard \
+  kubernetes-dashboard/kubernetes-dashboard \
+  -n kubernetes-dashboard \
+  --create-namespace \
+  --set service.type=ClusterIP
+"""
+        sh """
+kubectl rollout status deployment/kubernetes-dashboard \
+  -n kubernetes-dashboard --timeout=300s
+"""
+
+        /* ===========================
+           MONITORING (INGRESS ONLY)
         ============================ */
         sh """
 helm upgrade --install monitoring ${HELM_BASE}/monitoring \
-  -n monitoring \
-  --create-namespace \
-  --timeout 15m
-"""
-
-        sh """
-kubectl rollout status deployment/monitoring-grafana \
-  -n monitoring --timeout=300s
+  -n kubernetes-dashboard \
+  --timeout 10m
 """
 
         /* ===========================
@@ -273,8 +285,7 @@ kubectl rollout status deployment/monitoring-grafana \
         def tools = payload.eks.tools_to_install ?: []
 
         if (tools.isEmpty()) {
-          echo "ℹ️ No EKS tools to deploy"
-          return
+          echo "ℹ️ No EKS tools defined in payload"
         }
 
         def namespaces = tools.collect { it.namespace ?: 'default' }.unique()
@@ -289,7 +300,7 @@ kubectl create secret docker-registry ecr-creds \
   --docker-server=${ecrRegistry} \
   --docker-username=AWS \
   --docker-password=\$(aws ecr get-login-password --region ${region}) \
-  --namespace ${ns}
+  -n ${ns}
 """
 
           sh """
@@ -299,14 +310,14 @@ kubectl patch serviceaccount default -n ${ns} \
         }
 
         /* ===========================
-           DEPLOY EACH TOOL
+           DEPLOY TOOLS (SURICATA / APP)
         ============================ */
         tools.each { t ->
 
           def name      = t.name
-          def namespace = t.namespace ?: "default"
+          def namespace = t.namespace ?: 'default'
           def chart     = t.chart
-          def tag       = t.image_tag ?: "latest"
+          def tag       = t.image_tag ?: 'latest'
           def ecrUrl    = t.ecr_repo_url ?: "${ecrRegistry}/${name}"
 
           echo "📦 Deploying tool: ${name}"
@@ -319,28 +330,20 @@ image:
 
 imagePullSecrets:
   - name: ecr-creds
-
-serviceAccount:
-  create: true
-  imagePullSecrets:
-    - name: ecr-creds
 """
 
           def chartPath = "${HELM_BASE}/${chart}"
-
           if (!fileExists(chartPath)) {
             error "❌ Helm chart not found: ${chartPath}"
           }
 
-          retry(3) {
-            sh """
+          sh """
 helm upgrade --install ${name} ${chartPath} \
   -n ${namespace} \
   --create-namespace \
   -f ${valuesFile} \
   --timeout 20m
 """
-          }
 
           sh """
 kubectl rollout status deployment/${name} \
@@ -349,16 +352,36 @@ kubectl rollout status deployment/${name} \
         }
 
         /* ===========================
-           DASHBOARD URL
+           DASHBOARD URL (REAL)
         ============================ */
-        env.DASHBOARD_URL = "https://dashboard.${cluster_name}.thesamurai.com"
-        echo "🌍 Dashboard URL: ${env.DASHBOARD_URL}"
+        env.DASHBOARD_URL = sh(
+          script: """
+kubectl get ingress eks-dashboard-ingress \
+  -n kubernetes-dashboard \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+""",
+          returnStdout: true
+        ).trim()
+
+        env.DASHBOARD_URL = "https://${env.DASHBOARD_URL}"
+
+        echo "🌍 Kubernetes Dashboard URL:"
+        echo "${env.DASHBOARD_URL}"
+
+        /* ===========================
+           DASHBOARD TOKEN (LOG)
+        ============================ */
+        sh """
+echo "🔐 Dashboard Access Token:"
+kubectl -n kubernetes-dashboard create token kubernetes-dashboard
+"""
 
         echo "✅ EKS deployment completed successfully"
       }
     }
   }
 }
+
 
 
 
