@@ -204,54 +204,62 @@ ${ip} ansible_user=ubuntu ansible_ssh_private_key_file=client-access-key.pem
 
 stage('Deploy Tools on EKS') {
   when { expression { env.SERVICE_TYPE == 'eks' } }
+
   steps {
     withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
       script {
-        def payload      = readJSON file: 'payload.json'
-        def cluster_name = payload.eks.cluster_name
-        def region       = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
-        def ecrRegistry  = "430118831270.dkr.ecr.${region}.amazonaws.com"
-        def HELM_BASE    = "${WORKSPACE}/helm"
-        // Pick a dashboard version to install; update if you want a newer one
-        def DASHBOARD_VERSION = "v2.8.0"
-        def DASHBOARD_MANIFEST = "https://raw.githubusercontent.com/kubernetes/dashboard/${DASHBOARD_VERSION}/aio/deploy/recommended.yaml"
 
-        echo "☸ Deploying to EKS cluster: ${cluster_name}"
+        def payload     = readJSON file: 'payload.json'
+        def clusterName = payload.eks.cluster_name
+        def region      = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
+        def ecrRegistry = "430118831270.dkr.ecr.${region}.amazonaws.com"
+        def HELM_BASE   = "${WORKSPACE}/helm"
 
-        // kubeconfig from terraform
-        def kubeconfig = sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
-        writeFile file: 'kubeconfig.yaml', text: kubeconfig
+        echo "☸ Deploying to EKS cluster: ${clusterName}"
+
+        /* ================= KUBECONFIG ================= */
+        writeFile file: 'kubeconfig.yaml',
+          text: sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
+
         env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
 
-        // login to ECR
+        /* ================= ECR LOGIN ================= */
         sh """
-aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${ecrRegistry}
+aws ecr get-login-password --region ${region} \
+| docker login --username AWS --password-stdin ${ecrRegistry}
 """
 
-        // ensure load-balancer controller – (safe idempotent install)
+        /* ================= ALB CONTROLLER ================= */
         sh """
 helm repo add eks https://aws.github.io/eks-charts || true
-helm repo update || true
+helm repo update
 
-helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \\
-  -n kube-system \\
-  --create-namespace \\
-  --set clusterName=${cluster_name} \\
-  --set serviceAccount.create=true \\
-  --set region=${region} \\
-  --set v=2
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --create-namespace \
+  --set clusterName=${clusterName} \
+  --set serviceAccount.create=true \
+  --set region=${region}
 """
 
-        // -----------------------------
-        // Install Kubernetes Dashboard
-        // -----------------------------
-        // apply official recommended manifest
+        /* ================= KUBERNETES DASHBOARD ================= */
         sh """
-echo "Applying Kubernetes Dashboard recommended manifest (${DASHBOARD_VERSION})..."
-kubectl apply -f ${DASHBOARD_MANIFEST}
+helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/ || true
+helm repo update
+
+helm upgrade --install kubernetes-dashboard kubernetes-dashboard/kubernetes-dashboard \
+  -n kubernetes-dashboard \
+  --create-namespace \
+  --set protocolHttp=false \
+  --set service.type=ClusterIP
 """
 
-        // create admin-user ServiceAccount + ClusterRoleBinding (safe idempotent apply)
+        sh """
+kubectl rollout status deployment/kubernetes-dashboard \
+  -n kubernetes-dashboard --timeout=300s
+"""
+
+        /* ================= ADMIN USER ================= */
         sh """
 cat <<'YAML' > dashboard-adminuser.yaml
 apiVersion: v1
@@ -277,89 +285,87 @@ YAML
 kubectl apply -f dashboard-adminuser.yaml
 """
 
-        // create ALB Ingress that points to kubernetes-dashboard service (listens HTTPS -> backend HTTPS)
-        def ingressHost = "dashboard.${cluster_name}.thesamurai.com"
+        /* ================= INSTALL YOUR MONITORING INGRESS ================= */
         sh """
-cat <<'YAML' > kubernetes-dashboard-ingress.yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: kubernetes-dashboard-ingress
-  namespace: kubernetes-dashboard
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/backend-protocol: HTTPS
-    # listen on 443 (HTTPS) on the ALB
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-spec:
-  rules:
-  - host: ${ingressHost}
-    http:
-      paths:
-      - path: /
-        pathType: ImplementationSpecific
-        backend:
-          service:
-            name: kubernetes-dashboard
-            port:
-              number: 443
-YAML
-
-kubectl apply -f kubernetes-dashboard-ingress.yaml
+helm upgrade --install monitoring ${HELM_BASE}/monitoring \
+  -n kubernetes-dashboard \
+  --timeout 10m
 """
 
-        // Wait for the ingress (ALB) to get an hostname. We'll poll for up to ~6 minutes
-        echo "Waiting for ALB hostname..."
-        def albHost = ""
-        for (int i = 0; i < 36; i++) { // 36 * 10s = 6 minutes
-          albHost = sh(script: "kubectl -n kubernetes-dashboard get ingress kubernetes-dashboard-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true", returnStdout: true).trim()
-          if (albHost) {
-            echo "ALB hostname: ${albHost}"
-            break
+        /* ================= ECR SECRET FOR TOOLS ================= */
+        def tools = payload.eks.tools_to_install ?: []
+        def namespaces = tools.collect { it.namespace ?: 'default' }.unique()
+
+        namespaces.each { ns ->
+          sh "kubectl get ns ${ns} || kubectl create ns ${ns}"
+
+          sh """
+kubectl delete secret ecr-creds -n ${ns} --ignore-not-found
+kubectl create secret docker-registry ecr-creds \
+  --docker-server=${ecrRegistry} \
+  --docker-username=AWS \
+  --docker-password=\$(aws ecr get-login-password --region ${region}) \
+  -n ${ns}
+"""
+        }
+
+        /* ================= DEPLOY CLIENT TOOLS ================= */
+        tools.each { t ->
+
+          def chartPath = "${HELM_BASE}/${t.chart}"
+
+          if (!fileExists(chartPath)) {
+            error "❌ Helm chart not found: ${chartPath}"
           }
-          echo "  waiting 10s for ALB to provision..."
-          sleep time: 10, unit: 'SECONDS'
-        }
-        if (!albHost?.trim()) {
-          error("ALB did not become ready in time — check aws-load-balancer-controller logs and the Ingress resource.")
+
+          writeFile file: "values-${t.name}.yaml", text: """
+image:
+  repository: "${t.ecr_repo_url}"
+  tag: "${t.image_tag}"
+imagePullSecrets:
+  - name: ecr-creds
+"""
+
+          sh """
+helm upgrade --install ${t.name} ${chartPath} \
+  -n ${t.namespace} \
+  --create-namespace \
+  -f values-${t.name}.yaml \
+  --timeout 15m
+"""
         }
 
-        // Build dashboard URL (https)
+        /* ================= GET ALB URL ================= */
+        sleep 20
+
+        def albHost = sh(
+          script: """
+kubectl get ingress eks-dashboard-ingress \
+  -n kubernetes-dashboard \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+""",
+          returnStdout: true
+        ).trim()
+
         env.DASHBOARD_URL = "https://${albHost}"
-        echo "Dashboard external URL: ${env.DASHBOARD_URL}"
 
-        // Try to obtain a token for admin-user in a robust way:
-        // prefer `kubectl -n kubernetes-dashboard create token admin-user` (K8s >=1.24),
-        // fallback to extracting secret and base64-decoding it.
-        def dashboardToken = ""
-        try {
-          dashboardToken = sh(script: "kubectl -n kubernetes-dashboard create token admin-user 2>/dev/null || true", returnStdout: true).trim()
-        } catch (e) {
-          dashboardToken = ""
-        }
-        if (!dashboardToken) {
-          // fallback extraction
-          dashboardToken = sh(script: "kubectl -n kubernetes-dashboard get sa admin-user -o jsonpath='{.secrets[0].name}' | xargs -I{} kubectl -n kubernetes-dashboard get secret {} -o jsonpath='{.data.token}' | base64 --decode", returnStdout: true).trim()
-        }
-        if (!dashboardToken) {
-          echo "⚠️ Could not extract dashboard token automatically. You may need to inspect the secret manually."
-        } else {
-          // mask the token in build logs output where possible
-          env.DASHBOARD_TOKEN = dashboardToken
-          echo "✅ Dashboard token generated (masked in logs)."
-        }
+        echo "🌍 Dashboard URL: ${env.DASHBOARD_URL}"
 
-        // Optionally: write token to a file so that subsequent email stage can attach it
-        writeFile file: 'dashboard_token.txt', text: env.DASHBOARD_TOKEN ?: "<token-unavailable>"
+        /* ================= GENERATE LOGIN TOKEN ================= */
+        def token = sh(
+          script: "kubectl -n kubernetes-dashboard create token admin-user",
+          returnStdout: true
+        ).trim()
 
-        echo "✅ EKS dashboard and ingress deployed. Dashboard URL: ${env.DASHBOARD_URL}"
+        env.DASHBOARD_TOKEN = token
+
+        echo "🔐 Dashboard Token Generated"
+
+        echo "✅ EKS deployment completed successfully"
       }
     }
   }
 }
-
 
 
 
