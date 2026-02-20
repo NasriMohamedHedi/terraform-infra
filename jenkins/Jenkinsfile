@@ -1,56 +1,47 @@
 pipeline {
     agent any
+
     parameters {
         string(name: 'BUCKET', defaultValue: 'thesamuraibucket', description: 'S3 bucket name')
         string(name: 'KEY', defaultValue: '', description: 'Exact S3 object key (leave blank to auto-find latest)')
     }
+
     environment {
         AWS_DEFAULT_REGION = 'eu-central-1'
-        JENKINS_URL = "${params.jenkins_url ?: 'https://4585943c559d.ngrok-free.app'}"
         TIMESTAMP = "${new Date().format('yyyyMMdd_HHmmss')}"
     }
+
     stages {
-        stage('Declarative: Checkout SCM') {
+
+        stage('Checkout Repository') {
             steps {
                 script {
-                    try {
-                        checkout scm
-                    } catch (Exception e) {
-                        error "Failed to checkout SCM: ${e.message}"
-                    }
+                    checkout([$class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[url: 'https://github.com/NasriMohamedHedi/terraform-infra.git']]
+                    ])
                 }
             }
         }
-        stage('Checkout') {
+
+        stage('Find Payload in S3') {
             steps {
                 script {
-                    try {
-                        git url: 'https://github.com/NasriMohamedHedi/terraform-infra.git', branch: 'main'
-                    } catch (Exception e) {
-                        error "Failed to checkout Git repository: ${e.message}"
+                    env.S3_PAYLOAD_KEY = params.KEY ?: sh(
+                        script: "aws s3 ls s3://${params.BUCKET}/ | sort | tail -n 1 | awk '{print \$4}' || echo ''",
+                        returnStdout: true
+                    ).trim()
+
+                    if (!env.S3_PAYLOAD_KEY) {
+                        error "❌ No payload JSON found in bucket ${params.BUCKET}"
                     }
+
+                    echo "✅ Using payload: ${env.S3_PAYLOAD_KEY}"
                 }
             }
         }
-        stage('Find Payload JSON Key') {
-            steps {
-                script {
-                    try {
-                        env.S3_PAYLOAD_KEY = params.KEY ?: sh(script: "aws s3 ls s3://${params.BUCKET}/ || echo 'no_key_found'", returnStdout: true).trim()
-                        if (env.S3_PAYLOAD_KEY == 'no_key_found' || env.S3_PAYLOAD_KEY == '') {
-                            env.S3_PAYLOAD_KEY = sh(script: "aws s3 ls s3://${params.BUCKET}/ | sort | tail -n 1 | awk '{print \$4}' || echo 'default_key'", returnStdout: true).trim()
-                            if (env.S3_PAYLOAD_KEY == 'default_key') {
-                                error "No payload JSON key found in S3 bucket ${params.BUCKET}"
-                            }
-                        }
-                        echo "Using provided S3 key: ${env.S3_PAYLOAD_KEY}"
-                    } catch (Exception e) {
-                        error "Failed to find payload JSON key: ${e.message}"
-                    }
-                }
-            }
-        }
-        stage('Download Payload JSON') {
+
+        stage('Download Payload') {
             steps {
                 withCredentials([[
                     $class: 'AmazonWebServicesCredentialsBinding',
@@ -58,38 +49,27 @@ pipeline {
                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
                     secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
                 ]]) {
-                    script {
-                        try {
-                            def downloadResult = sh(script: "aws s3 cp s3://${params.BUCKET}/${env.S3_PAYLOAD_KEY} payload.json || echo 'download_failed'", returnStatus: true)
-                            if (downloadResult != 0) {
-                                error "Failed to download payload JSON from s3://${params.BUCKET}/${env.S3_PAYLOAD_KEY}"
-                            }
-                        } catch (Exception e) {
-                            error "Error downloading payload JSON: ${e.message}"
-                        }
-                    }
+                    sh "aws s3 cp s3://${params.BUCKET}/${env.S3_PAYLOAD_KEY} payload.json"
                 }
             }
         }
-        stage('Parse Payload for Service Type') {
+
+        stage('Parse Payload') {
             steps {
                 script {
-                    try {
-                        def payload = readJSON file: 'payload.json'
-                        if (!payload.service_type) {
-                            error "Payload JSON missing service_type"
-                        }
-                        env.SERVICE_TYPE = payload.service_type
-                        echo "Payload JSON loaded:"
-                        echo "  User Name: ${payload.user_name ?: 'N/A'}"
-                        echo "  Service Type: ${env.SERVICE_TYPE}"
-                        echo "  Instances: ${payload.instances?.keySet() as List ?: 'N/A'}"
-                    } catch (Exception e) {
-                        error "Failed to parse payload JSON: ${e.message}"
-                    }
+                    def payload = readJSON file: 'payload.json'
+                    if (!payload.service_type) error "Missing service_type in payload"
+
+                    env.SERVICE_TYPE = payload.service_type
+                    echo """
+                    👤 User: ${payload.user_name}
+                    🧩 Service Type: ${env.SERVICE_TYPE}
+                    📦 Client Email: ${payload.client_email}
+                    """
                 }
             }
         }
+
         stage('Terraform Init') {
             steps {
                 withCredentials([[
@@ -99,204 +79,377 @@ pipeline {
                     secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
                 ]]) {
                     script {
-                        try {
-                            def payload = readJSON file: 'payload.json'
-                            if (payload.service_type) {
-                                sh "cp backends/backend-${payload.service_type}.tf backend.tf || echo 'No backend file for ${payload.service_type}'"
-                                sh "terraform init -input=false -reconfigure || echo 'Terraform init failed'"
-                            } else {
-                                error "Service type not found in payload"
-                            }
-                        } catch (Exception e) {
-                            error "Failed to initialize Terraform: ${e.message}"
+                        def payload = readJSON file: 'payload.json'
+                        if (payload.service_type) {
+                            sh "cp backends/backend-${payload.service_type}.tf backend.tf || echo 'No backend file for ${payload.service_type}'"
+                            sh "terraform init -reconfigure -upgrade -input=false"
                         }
                     }
                 }
             }
         }
+
         stage('Terraform Apply') {
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform-creds',
-                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-                ]]) {
-                    script {
-                        try {
-                            def payload = readJSON file: 'payload.json'
-                            echo "Service Type detected: ${payload.service_type}"
-                            sh """
-                                terraform apply \
-                                  -var 's3_payload_bucket=${params.BUCKET}' \
-                                  -var 's3_payload_key=${env.S3_PAYLOAD_KEY}' \
-                                  -auto-approve || exit 1
-                            """
-                            if (payload.service_type == 'ec2') {
-                                sh """
-                                    terraform output -raw private_key_pem > client-access-key.pem || exit 1
-                                    chmod 400 client-access-key.pem || exit 1
-                                """
-                                archiveArtifacts artifacts: 'client-access-key.pem'
-                            } else if (payload.service_type == 'eks') {
-                                def clusterName = sh(script: "terraform output -raw cluster_name || echo 'no_cluster'", returnStdout: true).trim()
-                                if (clusterName == 'no_cluster') {
-                                    error "No cluster name output, deployment failed"
-                                } else {
-                                    echo "Cluster created: ${clusterName}"
-                                    sh """
-                                        aws eks update-kubeconfig --name ${clusterName} --region ${AWS_DEFAULT_REGION}
-                                        kubectl cluster-info
-                                    """
-                                }
-                            }
-                        } catch (Exception e) {
-                            error "Failed to apply Terraform: ${e.message}"
-                        }
-                    }
-                }
-            }
-        }
-        stage('Install Tools with Ansible') {
-            when {
-                expression { env.SERVICE_TYPE == 'ec2' }
-            }
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform-creds',
-                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-                ]]) {
-                    script {
-                        try {
-                            def payload = readJSON file: 'payload.json'
-                            def instance_keys = payload.instances.keySet()
-                            if (instance_keys.isEmpty()) {
-                                error "No instances found in payload"
-                            }
-                            def instance_key = instance_keys[0]
-                            def ip = sh(
-                                script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_key}\"' || echo 'no_ip'",
-                                returnStdout: true
-                            ).trim()
-                            if (ip == 'no_ip' || !ip) {
-                                error "No IP found for instance ${instance_key}"
-                            }
-                            def toolsList = payload.instances[instance_key].tools_to_install ?: []
-                            writeFile file: 'inventory.ini', text: "${ip} ansible_user=ubuntu ansible_ssh_private_key_file=${WORKSPACE}/client-access-key.pem"
-                            timeout(time: 30, unit: 'MINUTES') {
-                                retry(10) {
-                                    sh """
-                                        until ssh -i client-access-key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@${ip} 'echo SSH is up' || exit 1; do
-                                            echo "Waiting for SSH... (Retrying in 30 seconds)"
-                                            sleep 30
-                                        done
-                                    """
-                                }
-                            }
-                            ansiblePlaybook(
-                                playbook: 'ansible/install_tools.yml',
-                                inventory: 'inventory.ini',
-                                extraVars: [
-                                    tools_to_install: toolsList
-                                ]
-                            )
-                        } catch (Exception e) {
-                            error "Failed to install tools with Ansible: ${e.message}"
-                        }
-                    }
-                }
-            }
-        }
-        stage('Send SSH Details') {
-            when {
-                expression { env.SERVICE_TYPE == 'ec2' }
-            }
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform-creds',
-                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-                ]]) {
-                    script {
-                        try {
-                            def payload = readJSON file: 'payload.json'
-                            def instance_key = payload.instances.keySet()[0]
-                            def ip = sh(
-                                script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_key}\"' || echo 'no_ip'",
-                                returnStdout: true
-                            ).trim()
-                            if (ip == 'no_ip' || !ip) {
-                                error "No IP found for instance ${instance_key}"
-                            }
-                            def clientEmail = payload.client_email
-                            if (!clientEmail) {
-                                error "No client_email found in payload"
-                            }
-                            sh "test -f client-access-key.pem || { echo 'Key file missing'; exit 1; }"
-                            sh "ls -l client-access-key.pem"
-                            emailext(
-                                to: clientEmail,
-                                replyTo: 'no-reply@apollo-dojo.com',
-                                subject: "🔑 Your VM SSH Credentials",
-                                body: """\
-                                    Hello,
-                                    Your EC2 instance is up and running. Follow these steps:
+    steps {
+        withCredentials([[ 
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: 'aws-terraform-creds',
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+        ]]) {
+            script {
+                def payload = readJSON file: 'payload.json'
+                echo "🚀 Applying Terraform for ${payload.service_type}"
 
-                                    Download the private key (attached):
-                                    client-access-key.pem
-                                    Secure the key:
-                                    chmod 400 client-access-key.pem
-                                    Connect over SSH:
-                                    ssh -i client-access-key.pem ubuntu@${ip}
-                                    Type “yes” if prompted.
-                                    Troubleshooting
+                sh """
+                    terraform apply \
+                      -var 's3_payload_bucket=${params.BUCKET}' \
+                      -var 's3_payload_key=${env.S3_PAYLOAD_KEY}' \
+                      -var 'aws_region=${AWS_DEFAULT_REGION}' \
+                      -auto-approve
+                """
 
-                                    Ensure the IP (${ip}) is correct and port 22 is open.
-                                    Verify key permissions with ls -l client-access-key.pem.
-                                    Cheers,
-                                    The Apollo Dojo Samurai Team
-                                """,
-                                attachmentsPattern: 'client-access-key.pem',
-                                mimeType: 'text/plain'
-                            )
-                            def privateKey = sh(script: "terraform output -raw private_key_pem || echo 'no_key'", returnStdout: true).trim()
-                            if (privateKey == 'no_key') {
-                                error "Failed to retrieve private key from Terraform output"
-                            }
-                            def sshDetails = [
-                                ip: ip,
-                                user: 'ubuntu',
-                                privateKey: privateKey
-                            ]
-                            def jsonDetails = groovy.json.JsonOutput.toJson(sshDetails)
-                            sh "echo '${jsonDetails}' > ssh_details.json"
-                            sh "aws s3 cp ssh_details.json s3://${params.BUCKET}/ssh_details_${env.TIMESTAMP}.json || exit 1"
-                        } catch (Exception e) {
-                            error "Failed to send SSH details: ${e.message}"
-                        }
-                    }
+                if (payload.service_type == 'ec2') {
+                    sh """
+                        terraform output -raw private_key_pem > client-access-key.pem
+                        chmod 400 client-access-key.pem
+                    """
+                    archiveArtifacts artifacts: 'client-access-key.pem'
                 }
             }
         }
     }
+
+    post {
+  success {
+    script {
+      echo "📐 Terraform apply successful → triggering diagram generation"
+
+      build job: 'GenerateDiagram',
+        wait: false,
+        parameters: [
+          string(
+            name: 'S3_BUCKET',
+            value: params.BUCKET
+          ),
+          string(
+            name: 'S3_KEY',
+            value: env.S3_PAYLOAD_KEY
+          )
+        ]
+    }
+  }
+}
+}
+
+stage('Install Tools on EC2 (Ansible)') {
+  when { expression { env.SERVICE_TYPE == 'ec2' } }
+  steps {
+    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+      script {
+        def payload = readJSON file: 'payload.json'
+        def instance_name = payload.instances.keySet()[0]
+        def ip = sh(script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'", returnStdout: true).trim()
+
+        echo "🖥 EC2 instance IP: ${ip}"
+
+        // write inventory (unchanged)
+        writeFile file: 'inventory.ini', text: """
+[ec2]
+${ip} ansible_user=ubuntu ansible_ssh_private_key_file=client-access-key.pem
+"""
+
+        def tools = payload.instances[instance_name].tools_to_install ?: []
+        def tools_json = writeJSON returnText: true, json: tools
+
+        // Ensure private key has correct permissions (should already be set earlier)
+        sh "chmod 400 client-access-key.pem || true"
+
+        // Create a local known_hosts file for this workspace and add the host key (non-interactive)
+        sh """
+          mkdir -p "${WORKSPACE}/.ssh"
+          echo "⏳ Scanning host key for ${ip}..."
+          ssh-keyscan -H ${ip} > ${WORKSPACE}/known_hosts 2>/dev/null || true
+          echo "Known hosts file created at: ${WORKSPACE}/known_hosts"
+        """
+
+        // Optional quick connectivity test (helps debug failures)
+        def ok = sh(script: "ssh -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=${WORKSPACE}/known_hosts -i client-access-key.pem ubuntu@${ip} 'echo SSH_OK' || echo SSH_FAIL", returnStdout: true).trim()
+        echo "SSH test result: ${ok}"
+
+        if (ok != 'SSH_OK') {
+          echo "⚠️ SSH connectivity test failed. Common causes:"
+          echo "  • Instance not ready yet (EC2 cloud-init still running)."
+          echo "  • Security group blocking port 22 from the Jenkins agent."
+          echo "  • Wrong username/key (AMI expects another user)."
+          // show netcat test (if available) to verify port 22 is open
+          sh "echo 'Checking TCP port 22...' ; (nc -z -v ${ip} 22 && echo 'PORT_OPEN') || echo 'PORT_CLOSED' || true"
+          // proceed anyway (ansible will show more logs), or uncomment the next line to fail early:
+          // error('SSH test failed — aborting Ansible run')
+        }
+
+        // Run ansible-playbook but instruct Ansible to use the workspace known_hosts file
+        withEnv([
+          "ANSIBLE_HOST_KEY_CHECKING=True",
+          "ANSIBLE_SSH_COMMON_ARGS=-o UserKnownHostsFile=${WORKSPACE}/known_hosts -o StrictHostKeyChecking=yes"
+        ]) {
+          sh "ansible-playbook -i inventory.ini --extra-vars 'tools_to_install=${tools_json}' ansible/install_tools.yml"
+        }
+      }
+    }
+  }
+}
+
+
+
+stage('Deploy Tools on EKS') {
+  when { expression { env.SERVICE_TYPE == 'eks' } }
+
+  steps {
+    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-creds']]) {
+      script {
+
+        def payload     = readJSON file: 'payload.json'
+        def clusterName = payload.eks.cluster_name
+        def region      = env.AWS_DEFAULT_REGION ?: 'eu-central-1'
+        def ecrRegistry = "430118831270.dkr.ecr.${region}.amazonaws.com"
+        def HELM_BASE   = "${WORKSPACE}/helm"
+
+        echo "☸ Deploying to EKS cluster: ${clusterName}"
+
+        /* ================= KUBECONFIG ================= */
+        writeFile file: 'kubeconfig.yaml',
+          text: sh(script: "terraform output -raw eks_kubeconfig", returnStdout: true).trim()
+
+        env.KUBECONFIG = "${WORKSPACE}/kubeconfig.yaml"
+
+        /* ================= ECR LOGIN ================= */
+        sh """
+aws ecr get-login-password --region ${region} \
+| docker login --username AWS --password-stdin ${ecrRegistry}
+"""
+
+        /* ================= ALB CONTROLLER ================= */
+        sh """
+helm repo add eks https://aws.github.io/eks-charts || true
+helm repo update
+
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --create-namespace \
+  --set clusterName=${clusterName} \
+  --set serviceAccount.create=true \
+  --set region=${region}
+"""
+
+        /* ================= KUBERNETES DASHBOARD ================= */
+        sh """
+helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/ || true
+helm repo update
+
+helm upgrade --install kubernetes-dashboard kubernetes-dashboard/kubernetes-dashboard \
+  -n kubernetes-dashboard \
+  --create-namespace \
+  --set protocolHttp=false \
+  --set service.type=ClusterIP
+"""
+
+        sh """
+kubectl rollout status deployment/kubernetes-dashboard \
+  -n kubernetes-dashboard --timeout=300s
+"""
+
+        /* ================= ADMIN USER ================= */
+        sh """
+cat <<'YAML' > dashboard-adminuser.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kubernetes-dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kubernetes-dashboard
+YAML
+
+kubectl apply -f dashboard-adminuser.yaml
+"""
+
+        /* ================= INSTALL YOUR MONITORING INGRESS ================= */
+        sh """
+helm upgrade --install monitoring ${HELM_BASE}/monitoring \
+  -n kubernetes-dashboard \
+  --timeout 10m
+"""
+
+        /* ================= ECR SECRET FOR TOOLS ================= */
+        def tools = payload.eks.tools_to_install ?: []
+        def namespaces = tools.collect { it.namespace ?: 'default' }.unique()
+
+        namespaces.each { ns ->
+          sh "kubectl get ns ${ns} || kubectl create ns ${ns}"
+
+          sh """
+kubectl delete secret ecr-creds -n ${ns} --ignore-not-found
+kubectl create secret docker-registry ecr-creds \
+  --docker-server=${ecrRegistry} \
+  --docker-username=AWS \
+  --docker-password=\$(aws ecr get-login-password --region ${region}) \
+  -n ${ns}
+"""
+        }
+
+        /* ================= DEPLOY CLIENT TOOLS ================= */
+        tools.each { t ->
+
+          def chartPath = "${HELM_BASE}/${t.chart}"
+
+          if (!fileExists(chartPath)) {
+            error "❌ Helm chart not found: ${chartPath}"
+          }
+
+          writeFile file: "values-${t.name}.yaml", text: """
+image:
+  repository: "${t.ecr_repo_url}"
+  tag: "${t.image_tag}"
+imagePullSecrets:
+  - name: ecr-creds
+"""
+
+          sh """
+helm upgrade --install ${t.name} ${chartPath} \
+  -n ${t.namespace} \
+  --create-namespace \
+  -f values-${t.name}.yaml \
+  --timeout 15m
+"""
+        }
+
+        /* ================= GET ALB URL ================= */
+        sleep 20
+
+        def albHost = sh(
+          script: """
+kubectl get ingress eks-dashboard-ingress \
+  -n kubernetes-dashboard \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+""",
+          returnStdout: true
+        ).trim()
+
+        env.DASHBOARD_URL = "https://${albHost}"
+
+        echo "🌍 Dashboard URL: ${env.DASHBOARD_URL}"
+
+        /* ================= GENERATE LOGIN TOKEN ================= */
+        def token = sh(
+          script: "kubectl -n kubernetes-dashboard create token admin-user",
+          returnStdout: true
+        ).trim()
+
+        env.DASHBOARD_TOKEN = token
+
+        echo "🔐 Dashboard Token Generated"
+
+        echo "✅ EKS deployment completed successfully"
+      }
+    }
+  }
+}
+
+
+
+stage('Send EKS Dashboard Access') {
+  when { expression { env.SERVICE_TYPE == 'eks' } }
+  steps {
+    script {
+      def payload = readJSON file: 'payload.json'
+
+      emailext(
+        to: payload.client_email,
+        subject: "🛡 Your EKS Security Dashboard is Ready",
+        body: """
+Hello ${payload.user_name},
+
+Your EKS lab "${payload.eks.cluster_name}" is ready 🚀
+
+🔗 Access your live dashboards here:
+${env.DASHBOARD_URL}
+
+What you can see:
+• Cluster health
+• Pods & namespaces
+• Security tools metrics
+• Real-time monitoring
+
+No kubectl, no SSH required.
+
+Regards,
+Samurai DevOps Team
+"""
+      )
+    }
+  }
+}
+
+        stage('Send EC2 SSH Credentials') {
+            when { expression { env.SERVICE_TYPE == 'ec2' } }
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-terraform-creds',
+                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                ]]) {
+                    withEnv(["AWS_DEFAULT_REGION=eu-central-1"]) {
+                        script {
+                            def payload = readJSON file: 'payload.json'
+                            def instance_name = payload.instances.keySet()[0]
+
+                            // Terraform output now works because credentials are present
+                            def ip = sh(
+                                script: "terraform output -json ec2_public_ips | jq -r '.\"${instance_name}\"'",
+                                returnStdout: true
+                            ).trim()
+
+                            emailext(
+                                to: payload.client_email,
+                                subject: "🔑 SSH Access for Your EC2 Instance",
+                                body: """
+Hello ${payload.user_name},
+
+Your EC2 instance is ready and reachable at:
+ssh -i client-access-key.pem ubuntu@${ip}
+
+Regards,  
+Samurai DevOps Team
+                                """,
+                                attachmentsPattern: 'client-access-key.pem'
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+    } // END stages
+
     post {
         always {
-            script {
-                try {
-                    sh 'rm -f /tmp/client-access-key.pem outputs.json client-access-key.pem payload.json inventory.ini ssh_details.json || true'
-                } catch (Exception e) {
-                    echo "Warning: Failed to clean up files: ${e.message}"
-                }
-            }
+            sh 'rm -f client-access-key.pem payload.json kubeconfig.yaml inventory.ini || true'
         }
-        success {
-            echo "Pipeline completed successfully!"
-        }
-        failure {
-            echo "Pipeline failed. Check logs for details."
-        }
+        success { echo "✅ Pipeline completed successfully!" }
+        failure { echo "❌ Pipeline failed — check logs." }
     }
-}
+
+} // END pipeline

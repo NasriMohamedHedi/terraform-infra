@@ -1,0 +1,93 @@
+pipeline {
+  agent any
+
+  parameters {
+    string(name: 'S3_BUCKET', description: 'S3 bucket containing payload')
+    string(name: 'S3_KEY', description: 'S3 key of payload JSON')
+  }
+
+  environment {
+    PUPPETEER_EXECUTABLE_PATH = '/usr/bin/chromium-browser'
+    PUPPETEER_SKIP_DOWNLOAD   = 'true'
+  }
+
+  stages {
+
+    stage('Checkout repository') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Prepare workspace') {
+      steps {
+        sh '''
+          rm -rf diagram-output
+          mkdir -p diagram-output
+        '''
+      }
+    }
+
+    stage('Download payload from S3') {
+      steps {
+        withCredentials([[
+          $class: 'AmazonWebServicesCredentialsBinding',
+          credentialsId: 'aws-terraform-creds',
+          accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+          secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+        ]]) {
+          sh '''
+            echo "⬇️ Downloading payload from s3://${S3_BUCKET}/${S3_KEY}"
+            aws s3 cp s3://${S3_BUCKET}/${S3_KEY} diagram-output/payload.json
+            echo "📄 Payload content:"
+            cat diagram-output/payload.json
+          '''
+        }
+      }
+    }
+
+    stage('Generate Mermaid (.mmd)') {
+      steps {
+        sh '''
+          python3 diagrams/generate_mermaid.py \
+            --payload diagram-output/payload.json \
+            --out diagram-output/lab.mmd
+
+          echo "📐 Mermaid file:"
+          sed -n '1,200p' diagram-output/lab.mmd
+        '''
+      }
+    }
+
+    stage('Render Diagram (PNG + SVG)') {
+  steps {
+    sh '''
+      set -e
+
+      echo "🔍 Debug"
+      which mmdc
+      ls -l /usr/local/bin/chrome-headless-wrapper
+
+      export PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chrome-headless-wrapper
+      export PUPPETEER_SKIP_DOWNLOAD=true
+
+      echo "🚀 Rendering PNG"
+      mmdc -i diagram-output/lab.mmd -o diagram-output/lab.png
+
+      echo "🚀 Rendering SVG"
+      mmdc -i diagram-output/lab.mmd -o diagram-output/lab.svg
+    '''
+  }
+}
+  }
+
+  post {
+    success {
+      archiveArtifacts artifacts: 'diagram-output/*', fingerprint: true
+      echo "✅ Diagram generated successfully"
+    }
+    failure {
+      echo "❌ Diagram generation failed"
+    }
+  }
+}

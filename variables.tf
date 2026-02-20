@@ -20,4 +20,10 @@ variable "jenkins_url" {
   default     = "https://4585943c559d.ngrok-free.app"
 }
 
+# Toggle: set false to avoid creating/reading ECR repos (use your manual ECR repos)
+variable "create_ecr_repos" {
+  description = "When false, module.eks will not create/read ECR repositories"
+  type        = bool
+  default     = false
+}
 

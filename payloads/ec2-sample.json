@@ -1,0 +1,20 @@
+{
+  "user_name": "Mohamed Hedi Nasri",
+  "client_email": "mnasri@thesamurai.com",
+  "service_type": "ec2",
+  "instances": {
+    "DEMO-vm": {
+      "name": "TESTEST-vm",
+      "ami": "ami-0cebfb1f908092578",
+      "instance_type": "t3.xlarge",
+      "security_groups": ["sg-0d1e97a685dc65bd9"], 
+      "key_name": "client-access-key",
+      "subnet_id": "subnet-0e40cc88942302f2e",
+      "tools_to_install": ["htop", "vim"],
+      "tags": {
+        "Environment": "Development",
+        "Owner": "Mohamed Hedi Nasri"
+      }
+    }
+  }
+}
